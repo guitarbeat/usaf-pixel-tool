@@ -1,0 +1,9 @@
+streamlit>=1.2
+numpy
+opencv-python
+matplotlib
+streamlit-image-coordinates
+pillow
+scipy
+scikit-image>=0.19.0
+scikit-learn>=1.0.0 

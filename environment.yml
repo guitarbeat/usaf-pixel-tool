@@ -1,0 +1,20 @@
+name: pyimagej
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.7
+  - pyimagej
+  - openjdk=8
+  - numpy
+  - matplotlib
+  - pandas
+  - scipy
+  - scikit-image
+  - xarray
+  - imglyb>=2.1.0
+  - jgo>=1.0.3
+  - jpype>=1.3.0
+  - labeling>=0.1.14
+  - scyjava>=1.8.0
+  - pyobjc-core
+  - pyobjc-framework-cocoa 
