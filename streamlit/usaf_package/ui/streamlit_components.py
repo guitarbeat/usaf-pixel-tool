@@ -13,236 +13,180 @@ import cv2
 import pandas as pd
 
 # Import core modules
-from ..main import run_analysis
-from ..utils.image_tools import (
-    process_uploaded_file, create_dummy_file_object, extract_roi_image
+from usaf_package.main import run_analysis
+from usaf_package.core.usaf_target import USAFTarget
+from usaf_package.utils.streamlit_helpers import (
+    process_uploaded_file, extract_roi_image, save_analysis_results
 )
-from ..utils.streamlit_helpers import (
-    prepare_config_from_parameters, save_analysis_results
-)
+
+from usaf_package.processing.image_processor import ImageProcessor
+from usaf_package.processing.profile_analyzer import ProfileAnalyzer
+
+
+def run_analysis(
+    image_path: str,
+    roi: tuple = None,
+    group: int = 2,
+    element: int = 3
+):
+    """
+    Run the USAF 1951 target analysis pipeline.
+
+    Args:
+        image_path (str): Path to the image file
+        roi (tuple): (x, y, width, height) region of interest, or None for full image
+        group (int): USAF group number
+        element (int): USAF element number
+
+    Returns:
+        dict: Analysis results
+    """
+    # Load image
+    img_proc = ImageProcessor()
+    img_proc.load_image(image_path)
+
+    # Select ROI if provided
+    if roi is not None:
+        img_proc.select_roi(roi)
+
+    # Get horizontal profile
+    profile = img_proc.get_line_profile()
+
+    # Analyze profile using boundary detection
+    analyzer = ProfileAnalyzer()
+    results = analyzer.analyze_profile(
+        profile=profile,
+        group=group,
+        element=element
+    )
+
+    # Add extra info for UI/consistency
+    results["raw_profile"] = profile.tolist() if hasattr(profile, 'tolist') else profile
+    results["group"] = group
+    results["element"] = element
+
+    return results 
 
 # Default image path
 DEFAULT_IMAGE_PATH = "/Users/aaron/Library/CloudStorage/Box-Box/FOIL/Aaron/2025-05-12/airforcetarget_images/AF_2_2_00001.png"
 
-@st.cache_data
-def load_default_image():
-    """Cache the default image loading."""
-    if os.path.exists(DEFAULT_IMAGE_PATH):
-        return create_dummy_file_object(DEFAULT_IMAGE_PATH)
-    return None
+__all__ = [
+    "run_streamlit_app"
+]
 
-def setup_sidebar():
-    """Setup the sidebar with a clean, minimal interface."""
-    with st.sidebar:
-        st.title("Settings")
-        
-        # File uploader with improved styling
-        uploaded_file = st.file_uploader(
-        "Upload USAF target image",
-        type=["jpg", "jpeg", "png", "tif", "tiff"],
-        help="Select an image containing a USAF 1951 resolution target"
-    )
-    
-        # Analysis parameters in a clean layout
-        st.subheader("Target Parameters")
-        
-        # Use columns for related inputs
-        col1, col2 = st.columns(2)
-        with col1:
-            group = st.number_input(
-                "Group",
-                value=2,
-                min_value=-2,
-                max_value=9,
-                help="MIL-STD-150A target group number (-2 to 9)"
-            )
-        with col2:
-            element = st.number_input(
-                "Element",
-                value=2,
-                min_value=1,
-                max_value=6,
-                help="MIL-STD-150A target element number (1 to 6)"
-            )
-        
-        # Profile extraction method
-        profile_method = st.radio(
-            "Profile Extraction Method",
-            ["ROI Average", "Single Line"],
-            index=0,
-            help="ROI Average uses all rows/columns. Single Line uses one specific line."
-        )
-        
-        # Show position slider only when Single Line is selected
-        profile_position = None
-        if profile_method == "Single Line":
-            profile_position = st.slider(
-                "Line Position (%)",
-                min_value=0,
-                max_value=100,
-                value=50,
-                step=1,
-                help="Position of the scan line within the ROI (percentage)"
-            )
-        
-        # Profile orientation
-        orientation = st.radio(
-            "Profile Orientation",
-            ["Horizontal", "Vertical"],
-            index=0,
-            help="Horizontal profile analyzes line pairs along width. Vertical along height."
-        )
-        
-        # Advanced settings in an expander
-        with st.expander("Advanced Detection Settings"):
-            col1, col2 = st.columns(2)
-            with col1:
-                sensitivity = st.slider(
-                    "Sensitivity",
-                    min_value=0.1,
-                    max_value=0.5,
-                    value=0.2,
-                    step=0.05,
-                    help="Lower values = more sensitive detection"
-                )
-            with col2:
-                min_distance = st.slider(
-                    "Min Distance",
-                    min_value=5,
-                    max_value=30,
-                    value=15,
-                    step=1,
-                    help="Minimum pixels between detected features"
-                )
-            smooth_profile = st.checkbox(
-                "Smooth Profile",
-                value=True,
-                help="Apply smoothing to reduce noise"
-            )
-        
-        # ROI controls
-        st.subheader("ROI Selection")
-        st.info("Click and drag on the image to select the region of interest")
-        reset_roi = st.button("Reset Selection", use_container_width=True)
-        
-        # Help section in an expander
-        with st.expander("About MIL-STD-150A"):
-            st.markdown("""
-            **Target Arrangement:**
-            - Six groups in three layers
-            - Largest groups on outer sides
-            - Smaller layers toward center
-            - Each group has six elements
-            - Resolution doubles with each element
-            """)
-    
-    return {
-        "uploaded_file": uploaded_file,
-        "reset_roi": reset_roi,
-        "group": group,
-        "element": element,
-        "sensitivity": sensitivity,
-        "min_distance": min_distance,
-        "profile_method": profile_method,
-        "profile_position": profile_position,
-        "orientation": orientation.lower(),
-        "smooth_profile": smooth_profile
-    }
+# ----------------------
+# Session State Helpers
+# ----------------------
+def load_default_image():
+    """Return the default image path if it exists, else None."""
+    if os.path.exists(DEFAULT_IMAGE_PATH):
+        return DEFAULT_IMAGE_PATH
+    return None
 
 def initialize_session_state():
     """Initialize or reset Streamlit session state variables."""
-    # ROI selection state
-    if 'coordinates' not in st.session_state:
-        st.session_state.coordinates = None
-    # Analysis state
-    if 'analysis_results' not in st.session_state:
-        st.session_state.analysis_results = None
-    # ROI change detection
-    if 'analyzed_roi' not in st.session_state:
-        st.session_state.analyzed_roi = None
+    for key in [
+        'coordinates', 'analysis_results', 'analyzed_roi',
+        'last_group', 'last_element'
+    ]:
+        if key not in st.session_state:
+            st.session_state[key] = None
 
 def reset_session_state():
     """Reset session state variables."""
-    st.session_state.coordinates = None
-    st.session_state.analysis_results = None
-    st.session_state.analyzed_roi = None
+    for key in [
+        'coordinates', 'analysis_results', 'analyzed_roi',
+        'last_group', 'last_element'
+    ]:
+        st.session_state[key] = None
 
-def handle_image_selection(image, key="usaf_image"):
-    """
-    Handle interactive ROI selection on an image.
-    
-    Args:
-        image: The image to display
-        key: Unique key for the streamlit component
-        
-    Returns:
-        tuple: ROI coordinates as (x, y, width, height) or None
-    """
-    # Use streamlit_image_coordinates with click_and_drag feature
-    coords = streamlit_image_coordinates(
-        image,
-        key=key,
-        click_and_drag=True
-    )
-    
-    # Process the coordinates
-    if coords is not None and coords.get("x1") is not None:
-        point1 = (coords["x1"], coords["y1"])
-        point2 = (coords["x2"], coords["y2"])
-        
-        # Only update if this is a meaningful rectangle (not just a click)
-        if (point1[0] != point2[0] and 
-            point1[1] != point2[1] and 
-            st.session_state.coordinates != (point1, point2)):
-            
-            st.session_state.coordinates = (point1, point2)
-            return True  # Signal that coordinates changed
-    
-    return False  # No change
+def get_image_session_keys(idx):
+    """Return all session state keys for a given image index."""
+    return {
+        'group': f'group_{idx}',
+        'element': f'element_{idx}',
+        'analyzed_roi': f'analyzed_roi_{idx}',
+        'analysis_results': f'analysis_results_{idx}',
+        'last_group': f'last_group_{idx}',
+        'last_element': f'last_element_{idx}'
+    }
+
+# ----------------------
+# UI Helper Functions
+# ----------------------
+def group_element_selectors(idx, default_group=2, default_element=2):
+    """Display group and element number inputs for a given image index."""
+    keys = get_image_session_keys(idx)
+    if keys['group'] not in st.session_state:
+        st.session_state[keys['group']] = default_group
+    if keys['element'] not in st.session_state:
+        st.session_state[keys['element']] = default_element
+    col_g, col_e = st.columns(2)
+    with col_g:
+        group = st.number_input(
+            "Group", value=st.session_state[keys['group']], min_value=-2, max_value=9, key=keys['group']
+        )
+    with col_e:
+        element = st.number_input(
+            "Element", value=st.session_state[keys['element']], min_value=1, max_value=6, key=keys['element']
+        )
+    return group, element
+
+def display_metrics_row(results):
+    """Display a compact row of metrics for analysis results."""
+    group = results.get('group')
+    element = results.get('element')
+    lp_width_um = USAFTarget.line_pair_width_microns(group, element) if group is not None and element is not None else None
+    metric_cols = st.columns(4)
+    metrics = [
+        ("Line Pairs per mm", f"{results['lp_per_mm']:.2f}", "Line pairs per millimeter (lp/mm)"),
+        ("Line Pair Width (μm)", f"{lp_width_um:.2f}" if lp_width_um is not None else "-", "Line pair width in microns (μm)"),
+        ("Contrast", f"{results['contrast']:.2f}", "Michelson contrast ratio"),
+        ("Line Pairs Detected", f"{results['num_line_pairs']}", "Number of line pairs detected in ROI")
+    ]
+    for i, (label, value, helptext) in enumerate(metrics):
+        with metric_cols[i]:
+            st.markdown(f"<div style='font-size:1.1em'><b>{label}:</b> {value}</div>", unsafe_allow_html=True)
 
 def display_roi_info(image):
     """
     Display information about the selected ROI in a clean, useful format.
-    
     Args:
         image: The source image
-        
     Returns:
         tuple: ROI parameters as (x, y, width, height) or None
     """
     if not st.session_state.coordinates:
         st.info("Click and drag on the image to select a region of interest")
         return None
-    
     point1, point2 = st.session_state.coordinates
-    
-    # Calculate ROI parameters
     roi_x = min(point1[0], point2[0])
     roi_y = min(point1[1], point2[1])
     roi_width = abs(point2[0] - point1[0])
     roi_height = abs(point2[1] - point1[1])
-    
-    # Create a copy of the image with ROI rectangle
-    img_with_roi = image.copy()
-    
-    # Draw rectangle
-    cv2.rectangle(
-        img_with_roi,
-        (int(roi_x), int(roi_y)),
-        (int(roi_x + roi_width), int(roi_y + roi_height)),
-        (255, 0, 0),
-        2
-    )
-    
-    # Display image with ROI
-    st.image(img_with_roi, caption="Selected Region", use_container_width=True)
-    
-    # Show zoomed ROI
-    roi_image = image[int(roi_y):int(roi_y + roi_height), 
-                     int(roi_x):int(roi_x + roi_width)]
-    st.image(roi_image, caption="Zoomed View", use_container_width=True)
-    
     return (int(roi_x), int(roi_y), int(roi_width), int(roi_height))
+
+def handle_image_selection(image, key="usaf_image"):
+    """
+    Handle interactive ROI selection on an image.
+    Args:
+        image: The image to display
+        key: Unique key for the streamlit component
+    Returns:
+        bool: True if ROI coordinates changed, else False
+    """
+    coords = streamlit_image_coordinates(
+        image,
+        key=key,
+        click_and_drag=True
+    )
+    if coords is not None and coords.get("x1") is not None:
+        point1 = (coords["x1"], coords["y1"])
+        point2 = (coords["x2"], coords["y2"])
+        if (point1[0] != point2[0] and point1[1] != point2[1] and st.session_state.coordinates != (point1, point2)):
+            st.session_state.coordinates = (point1, point2)
+            return True
+    return False
 
 def display_welcome_screen():
     """Display the welcome screen with instructions when no image is loaded."""
@@ -251,20 +195,14 @@ def display_welcome_screen():
     with col1:
         st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/9/92/USAF-1951.svg/1024px-USAF-1951.svg.png", 
                 caption="Example USAF 1951 Target", use_container_width=True)
-    
     with col2:
         st.subheader("MIL-STD-150A Target Format")
-        
-        # Correct standard resolution formula
         st.latex(r"""
         \text{resolution (lp/mm)} = 2^{\text{group} + (\text{element} - 1)/6}
         """)
-        
-        # Line pair width formula
         st.latex(r"""
         \text{Line Pair Width (μm)} = \frac{1000}{2 \times \text{resolution (lp/mm)}}
         """)
-        
         st.markdown("""
         **Target Arrangement (MIL-STD-150A):**
         - Six groups in a compact spiral arrangement of three layers
@@ -275,489 +213,347 @@ def display_welcome_screen():
         - Even-numbered groups: First element at lower right, 2-6 at left
         """)
 
-def display_analysis_results(results, roi_image):
-    """Display analysis results in a clean, organized layout."""
-    if 'error' in results:
-        st.error(f"Analysis failed: {results['error']}")
-        return
-    
-    # Key metrics in a clean layout
-    st.header("Analysis Results")
-    
-    # Method and orientation info
-    profile_method = results.get('profile_method', 'ROI Average')
-    orientation = results.get('orientation', 'horizontal')
-    position = results.get('profile_position')
-    
-    # Method description
-    method_info = f"{orientation.capitalize()} profile using "
-    if profile_method == "ROI Average":
-        if orientation == "horizontal":
-            method_info += "column averages (averaged across all rows)"
-        else:
-            method_info += "row averages (averaged across all columns)"
-    else:
-        if position is not None:
-            if orientation == "horizontal":
-                method_info += f"single line at {position}% height"
-            else:
-                method_info += f"single line at {position}% width"
-    
-    st.info(method_info)
-    
-    # Top row: Key metrics
-    metric_cols = st.columns(3)
-    with metric_cols[0]:
-        st.metric(
-            "Resolution",
-            f"{results['resolution_microns']:.2f} µm",
-            help="Width of one line pair"
-        )
-    with metric_cols[1]:
-        st.metric(
-            "Contrast",
-            f"{results['contrast']:.2f}",
-            help="Michelson contrast ratio"
-        )
-    with metric_cols[2]:
-        st.metric(
-            "MTF",
-            f"{results['mtf']:.2f}",
-            help="Modulation Transfer Function"
-        )
-    
-    # Main content in tabs
-    tab1, tab2, tab3 = st.tabs(["Profile Analysis", "Reference Table", "Technical Details"])
-    
-    with tab1:
-        # Profile visualization
-        fig = create_profile_visualization(roi_image, results['raw_profile'], results)
-        st.pyplot(fig)
-        
-        # Line pair information with LaTeX
-        st.subheader("Line Pair Analysis")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write(f"Number of valleys detected: {results['num_valleys']}")
-            st.write(f"Number of peaks detected: {results['num_peaks']}")
-            st.write(f"Number of line pairs (cycles): {results['num_line_pairs']}")
-            st.latex(r"""
-            \text{A line pair = one black bar + one white bar (one cycle)}
-            """)
-        with col2:
-            st.write(f"Line pair width: {results['line_pair_width_microns']:.2f} µm")
-            st.latex(r"""
-            \text{Line Pair Width (μm)} = \frac{1000}{2^{\text{group} + (\text{element} - 1)/6}}
-            """)
-    
-    with tab2:
-        # Display the USAF 1951 resolution target reference table
-        st.subheader("USAF 1951 Resolution Target Reference Table")
-        st.markdown("""
-        This table shows the standard values for line pairs per millimeter based on the group and element:
-        """)
-        
-        # Create a pandas DataFrame with the standard values
-        data = {
-            "Group -2": [0.250, 0.281, 0.315, 0.354, 0.397, 0.445],
-            "Group -1": [0.500, 0.561, 0.630, 0.707, 0.794, 0.891],
-            "Group 0": [1.00, 1.12, 1.26, 1.41, 1.59, 1.78],
-            "Group 1": [2.00, 2.24, 2.52, 2.83, 3.17, 3.56],
-            "Group 2": [4.00, 4.49, 5.04, 5.66, 6.35, 7.13],
-            "Group 3": [8.00, 8.98, 10.08, 11.31, 12.70, 14.25],
-            "Group 4": [16.00, 17.96, 20.16, 22.63, 25.40, 28.51],
-            "Group 5": [32.0, 35.9, 40.3, 45.3, 50.8, 57.0],
-            "Group 6": [64.0, 71.8, 80.6, 90.5, 101.6, 114.0],
-            "Group 7": [128.0, 143.7, 161.3, 181.0, 203.2, 228.1],
-            "Group 8": [256.0, 287.4, 322.5, 362.0, 406.4, 456.1],
-            "Group 9": [512.0, 574.7, 645.1, 724.1, 812.7, 912.3]
-        }
-        
-        # Create DataFrame
-        df = pd.DataFrame(data)
-        
-        # Add element numbers as the index
-        df.index = [f"Element {i+1}" for i in range(6)]
-        
-        # Highlight the current group and element
-        group = results.get('group', 0)
-        element = results.get('element', 0)
-        
-        # Display the table
-        st.dataframe(
-            df,
-            column_config={f"Group {group}": st.column_config.Column(
-                f"Group {group}",
-                help="Current selection",
-                background="rgba(255, 255, 0, 0.3)",
-            )},
-            hide_index=False
-        )
-        
-        # Calculate and display the theoretical values for the current selection
-        st.subheader("Theoretical Values for Selected Group/Element")
-        
-        # Get the line pairs per mm value from the table
-        if -2 <= group <= 9 and 1 <= element <= 6:
-            group_key = f"Group {group}"
-            if group_key in data:
-                lp_per_mm = data[group_key][element-1]
-                line_width_um = 1000 / (2 * lp_per_mm)
-                st.write(f"Group {group}, Element {element}:")
-                st.write(f"Line pairs per mm: {lp_per_mm:.2f} lp/mm")
-                st.write(f"Line pair width: {1000/lp_per_mm:.2f} µm")
-                st.write(f"Line width (single bar): {line_width_um:.2f} µm")
-    
-    with tab3:
-        # Technical details in a clean format
-        st.json(results)
+def display_line_pair_expander(results):
+    """Display the line pair analysis expander with dynamic formulas and values."""
+    group = results.get('group')
+    element = results.get('element')
+    lp_width_um = USAFTarget.line_pair_width_microns(group, element) if group is not None and element is not None else None
+    lp_per_mm = results.get('lp_per_mm')
+    widths = results.get('line_pair_widths', [])
+    widths_str = ', '.join(str(int(w)) for w in widths)
+    st.write(f"**Widths:** {widths_str}")
+    st.markdown("""
+    <b>A line pair</b> = one black bar + one white bar (one cycle)<br>
+    <b>Line pair width</b> = distance from start of one black bar to the next
+    """, unsafe_allow_html=True)
+    st.markdown("<hr style='margin: 0.5em 0;' />", unsafe_allow_html=True)
+    st.latex(rf"Group = {group},\quad Element = {element}")
+    st.latex(rf"\text{{Line Pairs per mm}} = 2^{{{group} + ({element} - 1)/6}} = {lp_per_mm:.2f}")
+    st.latex(rf"\text{{Line Pair Width ($\mu m$)}} = \frac{{1000}}{{2 \times {lp_per_mm:.2f}}} = {lp_width_um:.2f}")
+    st.markdown(f"<b>Line Pairs per mm:</b> {lp_per_mm:.2f}<br>"
+                f"<b>Line Pair Width (μm):</b> {lp_width_um:.2f}", unsafe_allow_html=True)
+
+# ----------------------
+# Plotting Functions
+# ----------------------
+def detect_line_pair_boundaries(profile, threshold=20):
+    """
+    Detect line pair boundaries by finding significant transitions in the intensity profile.
+    Args:
+        profile: 1D numpy array of intensity values
+        threshold: Minimum absolute derivative to consider a transition
+    Returns:
+        List of x positions (pixel indices) where transitions occur
+    """
+    derivative = np.diff(profile)
+    boundaries = np.where(np.abs(derivative) > threshold)[0]
+    min_distance = 3  # pixels
+    filtered = []
+    last = -min_distance
+    for idx in boundaries:
+        if idx - last >= min_distance:
+            filtered.append(idx)
+            last = idx
+    return filtered
 
 def create_profile_visualization(roi_image, profile, results):
-    """
-    Create a matplotlib figure with the ROI image and intensity profile aligned to share the same x-axis.
-    Shows both peaks and valleys, with line pairs as cycles (black+white bars).
-    
-    Args:
-        roi_image: The ROI image
-        profile: The intensity profile
-        results: Analysis results dictionary with peak/valley positions
-        
-    Returns:
-        matplotlib.figure.Figure: The figure object
-    """
-    # Get image dimensions
+    import matplotlib.patches as patches
+    import matplotlib as mpl
+    try:
+        import seaborn as sns
+        cb_palette = sns.color_palette("colorblind")
+        magenta = cb_palette[3]
+        blue = cb_palette[0]
+    except ImportError:
+        magenta = '#CC79A7'
+        blue = '#0072B2'
     height, width = roi_image.shape[0], roi_image.shape[1]
-    
-    # Get info from results
-    valley_positions = results.get('valley_positions', [])
-    peak_positions = results.get('peak_positions', [])
-    profile_method = results.get('profile_method', 'ROI Average')
-    orientation = results.get('orientation', 'horizontal')
-    position = results.get('profile_position')
-    
-    # Create figure with two subplots with shared x-axis
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), 
-                                  sharex=True,
-                                  gridspec_kw={'height_ratios': [3, 1.5]})
-    
-    # Display the ROI image in the first subplot
-    ax1.imshow(roi_image, cmap='gray', aspect='auto', extent=[0, width, height, 0])
-    
-    # Show scan line if using single line method
-    if profile_method == "Single Line" and position is not None:
-        if orientation == "horizontal":
-            # For horizontal profile, line is at a specific y position
-            line_pos = int((position / 100.0) * height)
-            ax1.axhline(y=line_pos, color='yellow', linewidth=2, linestyle='--')
-            ax1.set_title(f"ROI Image with Scan Line at {position}% Height")
-        else:
-            # For vertical profile, line is at a specific x position
-            line_pos = int((position / 100.0) * width)
-            ax1.axvline(x=line_pos, color='yellow', linewidth=2, linestyle='--')
-            ax1.set_title(f"ROI Image with Scan Line at {position}% Width")
+    boundaries = results.get('boundaries', [])
+    line_pair_widths = results.get('line_pair_widths', [])
+    avg_line_pair_width = results.get('avg_line_pair_width', 0.0)
+    dpi = 200
+    fig, (ax_img, ax_prof) = plt.subplots(2, 1, figsize=(10, 5), dpi=dpi, gridspec_kw={'height_ratios': [1, 2]}, sharex=True)
+    if roi_image.ndim == 2:
+        ax_img.imshow(roi_image, cmap='gray', aspect='equal')
     else:
-        ax1.set_title(f"ROI Image with {'Horizontal' if orientation == 'horizontal' else 'Vertical'} Line Pairs")
-    
-    # Remove x-axis labels from top plot since they're shared
-    ax1.xaxis.set_tick_params(labelbottom=False)
-    ax1.set_ylabel("Y position (pixels)")
-    
-    # Filter valley positions to ensure they're valid
-    valid_valleys = [pos for pos in valley_positions if 0 <= pos < width]
-    valid_peaks = [pos for pos in peak_positions if 0 <= pos < width]
-    
-    # Draw vertical line at each valley position on both plots
-    for pos in valid_valleys:
-        ax1.axvline(x=pos, color='red', linestyle='--', linewidth=1)
-        # Note: We'll add lines to ax2 after plotting the profile
-    
-    # Draw vertical line at each peak position (using a different color)
-    for pos in valid_peaks:
-        ax1.axvline(x=pos, color='green', linestyle=':', linewidth=1)
-    
-    # Plot the profile in the second subplot with exact alignment to image x-coordinates
+        ax_img.imshow(roi_image, aspect='equal')
+    for x in boundaries:
+        ax_img.axvline(x, color=magenta, linestyle='--', linewidth=2, alpha=0.7)
+    bar_len = min(100, width // 5)
+    ax_img.plot([width - bar_len - 10, width - 10], [height - 10, height - 10], color='black', lw=4)
+    ax_img.text(width - bar_len // 2 - 10, height - 20, f"{bar_len} px", color='black', ha='center', va='top', fontsize=10, bbox=dict(fc='white', ec='none', alpha=0.7))
+    ax_img.set_xticks([])
+    ax_img.set_yticks([])
+    ax_img.set_ylabel("")
+    ax_img.set_title("ROI with Detected Line Pair Boundaries", fontsize=14, pad=10, loc='center')
     x = np.arange(len(profile))
-    ax2.plot(x, profile, linewidth=1.5, color='blue')
-    ax2.set_xlim(0, width)
-    
-    # Set the plot limits to better match the data
-    profile_min = min(profile) if len(profile) > 0 else 0
-    profile_max = max(profile) if len(profile) > 0 else 100
-    # Add 15% padding to the y-axis
-    y_padding = (profile_max - profile_min) * 0.15
-    ax2.set_ylim(profile_min - y_padding, profile_max + y_padding)
-    
-    # Now add valley lines to profile plot
-    for pos in valid_valleys:
-        if pos < len(profile):
-            ax2.axvline(x=pos, color='red', linestyle='--', linewidth=1)
-    
-    # Add peak lines to profile plot
-    for pos in valid_peaks:
-        if pos < len(profile):
-            ax2.axvline(x=pos, color='green', linestyle=':', linewidth=1)
-    
-    # Mark valleys on the profile
-    if valid_valleys:
-        valley_y = [profile[pos] for pos in valid_valleys if pos < len(profile)]
-        valley_x = [pos for pos in valid_valleys if pos < len(profile)]
-        
-        # Plot valley points with higher visibility
-        ax2.scatter(valley_x, valley_y, color='red', s=80, marker='v', label='Valleys (dark bars)', zorder=5)
-        
-        # Add position labels for valleys with improved visibility
-        for x, y in zip(valley_x, valley_y):
-            # White background for text
-            ax2.annotate(f"{int(x)}", 
-                       xy=(x, y), 
-                       xytext=(0, -20), 
-                       textcoords="offset points",
-                       ha='center',
-                       fontsize=9,
-                       fontweight='bold',
-                       bbox=dict(boxstyle="round,pad=0.2", 
-                                fc='white', 
-                                ec='black',
-                                alpha=0.8))
-        
-    # Mark peaks on the profile
-    if valid_peaks:
-        peak_y = [profile[pos] for pos in valid_peaks if pos < len(profile)]
-        peak_x = [pos for pos in valid_peaks if pos < len(profile)]
-        
-        # Plot peak points
-        ax2.scatter(peak_x, peak_y, color='green', s=80, marker='^', label='Peaks (bright bars)', zorder=5)
-        
-        # Add position labels for peaks
-        for x, y in zip(peak_x, peak_y):
-            ax2.annotate(f"{int(x)}", 
-                       xy=(x, y), 
-                       xytext=(0, 20), 
-                       textcoords="offset points",
-                       ha='center',
-                       fontsize=9,
-                       fontweight='bold',
-                       bbox=dict(boxstyle="round,pad=0.2", 
-                                fc='white', 
-                                ec='black',
-                                alpha=0.8))
-    
-    # Identify line pairs (cycles of black+white)
-    if len(valid_valleys) >= 1 and len(valid_peaks) >= 1:
-        # Arrange all points (peaks and valleys) in order
-        all_points = [(x, 'v') for x in valley_x] + [(x, 'p') for x in peak_x]
-        all_points.sort(key=lambda point: point[0])
-        
-        # Find sequences that contain both a valley and peak
-        line_pairs = []
-        for i in range(len(all_points) - 1):
-            point1 = all_points[i]
-            point2 = all_points[i + 1]
-            # If points are different types (one valley, one peak), they form a line pair
-            if point1[1] != point2[1]:
-                start_pos = point1[0]
-                end_pos = point2[0]
-                mid_pos = (start_pos + end_pos) / 2
-                line_pairs.append((start_pos, end_pos, mid_pos))
-            
-        # Draw and label each line pair
-        for i, (start_pos, end_pos, mid_pos) in enumerate(line_pairs):
-            # Draw bracket marking the line pair
-                lp_y = profile_min - y_padding * 0.5
-                lp_height = y_padding * 0.2
-                
-                # Draw bracket
-                ax2.plot([start_pos, end_pos], [lp_y, lp_y], 'g-', linewidth=2)
-                ax2.plot([start_pos, start_pos], [lp_y-lp_height, lp_y+lp_height], 'g-', linewidth=2)
-                ax2.plot([end_pos, end_pos], [lp_y-lp_height, lp_y+lp_height], 'g-', linewidth=2)
-            
-            # Label each line pair
-                ax2.annotate(f"LP {i+1}", 
-                           xy=(mid_pos, lp_y - lp_height/2),
-                       ha='center',
-                           color='g',
-                       fontweight='bold',
-                       bbox=dict(boxstyle="round,pad=0.2", 
-                                    fc='white', 
-                                    ec='black',
-                                    alpha=0.8))
-    
-    # Explain the x and y axes
-    profile_label = "Intensity Profile"
-    if orientation == "horizontal":
-        profile_label += " (Column Average)" if profile_method == "ROI Average" else f" (Row {position}%)"
-    else:
-        profile_label += " (Row Average)" if profile_method == "ROI Average" else f" (Column {position}%)"
-    
-    ax2.set_title(profile_label)
-    ax2.set_xlabel("Position (pixels)")
-    ax2.set_ylabel("Intensity Value")
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(loc='upper right')
-    
-    # Clear explanation of the intensity measurement
-    if profile_method == "ROI Average":
-        if orientation == "horizontal":
-            info_text = "Each point represents the\naverage intensity of one column"
-        else:
-            info_text = "Each point represents the\naverage intensity of one row"
-    else:
-        if orientation == "horizontal":
-            info_text = "Each point represents the\nintensity of one pixel in row at " + str(position) + "%"
-        else:
-            info_text = "Each point represents the\nintensity of one pixel in column at " + str(position) + "%"
-    
-    ax2.annotate(info_text, 
-                xy=(width//2, profile_max * 0.95),
-                xytext=(width//2, profile_max * 0.95),
-                ha='center',
-                bbox=dict(boxstyle="round,pad=0.3", 
-                         fc='white', 
-                         alpha=0.8))
-    
-    # Correct explanation of line pairs
-    ax2.annotate("Line Pair = One Cycle:\nOne dark bar (valley) +\nOne bright space (peak)", 
-                xy=(width * 0.1, profile_min + (profile_max-profile_min)*0.2),
-                xytext=(width * 0.1, profile_min + (profile_max-profile_min)*0.2),
-                ha='left',
-                bbox=dict(boxstyle="round,pad=0.3", 
-                         fc='white', 
-                         alpha=0.8))
-    
-    # Tighten the layout and add space between subplots
-    plt.tight_layout()
-    plt.subplots_adjust(hspace=0.3)
-    
+    ax_prof.plot(x, profile, linewidth=2, color=blue, label='Intensity Profile')
+    ax_prof.set_xlim(0, width)
+    ax_prof.set_ylim(0, 255)
+    ax_prof.set_xlabel("Position (pixels)", fontsize=13)
+    ax_prof.set_ylabel("Intensity Value", fontsize=13)
+    ax_prof.grid(True, alpha=0.2)
+    ax_prof.set_title("Intensity Profile (Column Average)", fontsize=14, pad=10, loc='center')
+    for i in range(len(line_pair_widths)):
+        if i+2 < len(boundaries):
+            x0 = boundaries[i]
+            x2 = boundaries[i+2]
+            y0 = profile[x0]
+            y2 = profile[x2]
+            mid_x = (x0 + x2) / 2
+            min_y = min(y0, y2)
+            y_offset = -10 - (i % 2) * 18
+            ax_prof.plot([x0, x2], [min_y-10, min_y-10], color=magenta, linewidth=3, alpha=0.7, label='Line Pair Segments' if i == 0 else "")
+            width_val = x2 - x0
+            ax_prof.annotate(f"{width_val} px", xy=(mid_x, min_y-15), xytext=(0, y_offset), textcoords='offset points',
+                         ha='center', va='top', fontsize=10, color=magenta,
+                         bbox=dict(boxstyle="round,pad=0.2", fc='white', ec=magenta, alpha=0.7))
+    ax_prof.annotate(f"Average line pair width: {avg_line_pair_width:.2f} px",
+                 xy=(0.5, 1.08), xycoords='axes fraction', ha='center', va='bottom', fontsize=12,
+                 bbox=dict(boxstyle="round,pad=0.3", fc='white', ec='black', alpha=0.8))
+    ax_prof.legend(loc='upper left', bbox_to_anchor=(1.01, 1), fontsize=11, frameon=False)
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
     return fig 
 
-def run_streamlit_app():
-    """Main Streamlit application function with improved UI and correct line pair analysis."""
+def annotated_roi_with_distances_figure(roi_image):
+    import matplotlib.pyplot as plt
+    from usaf_package.processing.profile_analyzer import detect_line_pair_boundaries
     try:
-        # Setup page configuration
+        import seaborn as sns
+        cb_palette = sns.color_palette("colorblind")
+        magenta = cb_palette[3]
+    except ImportError:
+        magenta = '#CC79A7'
+    profile = np.mean(roi_image, axis=0) if roi_image.ndim == 2 else np.mean(cv2.cvtColor(roi_image, cv2.COLOR_BGR2GRAY), axis=0)
+    boundaries = detect_line_pair_boundaries(profile)
+    fig, ax = plt.subplots(figsize=(5, 2), dpi=150)
+    if roi_image.ndim == 2:
+        ax.imshow(roi_image, cmap='gray', aspect='auto')
+    else:
+        ax.imshow(roi_image, aspect='auto')
+    for x in boundaries:
+        ax.axvline(x, color=magenta, linestyle='--', linewidth=2, alpha=0.7)
+    for i in range(len(boundaries)-2):
+        x0 = boundaries[i]
+        x2 = boundaries[i+2]
+        y = roi_image.shape[0] - 10
+        ax.plot([x0, x2], [y, y], color=magenta, linewidth=2, alpha=0.8)
+        ax.text((x0 + x2) / 2, y - 8, f"{x2 - x0} px", color=magenta, fontsize=10, ha='center', va='top', bbox=dict(fc='white', ec=magenta, alpha=0.7, boxstyle='round,pad=0.2'))
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title("")
+    plt.tight_layout(pad=0.2)
+    return fig
+
+def simple_profile_figure(profile, width):
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(5, 2), dpi=150)
+    x = np.arange(len(profile))
+    ax.plot(x, profile, linewidth=2, color='#0072B2')
+    ax.set_xlim(0, width)
+    ax.set_xlabel("Position (pixels)", fontsize=10)
+    ax.set_ylabel("Intensity", fontsize=10)
+    ax.grid(True, alpha=0.2)
+    ax.set_title("")
+    plt.tight_layout(pad=0.2)
+    return fig 
+
+def combined_profile_and_annotated_roi_figure(roi_image, profile, results, group, element):
+    import matplotlib.patches as patches
+    import matplotlib as mpl
+    try:
+        import seaborn as sns
+        cb_palette = sns.color_palette("colorblind")
+        magenta = cb_palette[3]
+        blue = cb_palette[0]
+    except ImportError:
+        magenta = '#CC79A7'
+        blue = '#0072B2'
+    height, width = roi_image.shape[0], roi_image.shape[1]
+    boundaries = results.get('boundaries', [])
+    line_pair_widths = results.get('line_pair_widths', [])
+    dpi = 150
+    fig, (ax_img, ax_prof) = plt.subplots(2, 1, figsize=(8, 5), dpi=dpi, gridspec_kw={'height_ratios': [1, 1.2]}, sharex=True)
+    # Annotated ROI
+    if roi_image.ndim == 2:
+        ax_img.imshow(roi_image, cmap='gray', aspect='equal')
+    else:
+        ax_img.imshow(roi_image, aspect='equal')
+    for x in boundaries:
+        ax_img.axvline(x, color=magenta, linestyle='--', linewidth=2, alpha=0.7)
+    for i in range(len(boundaries)-2):
+        x0 = boundaries[i]
+        x2 = boundaries[i+2]
+        y = roi_image.shape[0] - 10
+        ax_img.plot([x0, x2], [y, y], color=magenta, linewidth=2, alpha=0.8)
+        ax_img.text((x0 + x2) / 2, y - 8, f"{x2 - x0} px", color=magenta, fontsize=10, ha='center', va='top', bbox=dict(fc='white', ec=magenta, alpha=0.7, boxstyle='round,pad=0.2'))
+    ax_img.set_xticks([])
+    ax_img.set_yticks([])
+    ax_img.set_ylabel("")
+    ax_img.set_title("")
+    # Line Profile
+    x = np.arange(len(profile))
+    ax_prof.plot(x, profile, linewidth=2, color=blue)
+    ax_prof.set_xlim(0, width)
+    ax_prof.set_ylim(0, 255)
+    ax_prof.set_xlabel("Position (pixels)", fontsize=11)
+    ax_prof.set_ylabel("Intensity", fontsize=11)
+    ax_prof.grid(True, alpha=0.2)
+    ax_prof.set_title("")
+    for i in range(len(line_pair_widths)):
+        if i+2 < len(boundaries):
+            x0 = boundaries[i]
+            x2 = boundaries[i+2]
+            y0 = profile[x0]
+            y2 = profile[x2]
+            mid_x = (x0 + x2) / 2
+            min_y = min(y0, y2)
+            y_offset = -10 - (i % 2) * 18
+            ax_prof.plot([x0, x2], [min_y-10, min_y-10], color=magenta, linewidth=3, alpha=0.7)
+            width_val = x2 - x0
+            ax_prof.annotate(f"{width_val} px", xy=(mid_x, min_y-15), xytext=(0, y_offset), textcoords='offset points',
+                         ha='center', va='top', fontsize=10, color=magenta,
+                         bbox=dict(boxstyle="round,pad=0.2", fc='white', ec=magenta, alpha=0.7))
+    # No legend, no average annotation, no matplotlib title
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    return fig
+
+# ----------------------
+# Per-Image Analysis Logic
+# ----------------------
+def analyze_and_display_image(idx, uploaded_file, image, temp_path):
+    """
+    Handle all UI and analysis for a single image within an expander.
+    All image controls, ROI selection, and analysis are contained within the expander.
+    """
+    # Get image filename for the expander title
+    filename = uploaded_file.name if hasattr(uploaded_file, 'name') else f"Image {idx+1}"
+    
+    # Create an expander for this image
+    with st.expander(f"Image {idx+1}: {filename}", expanded=(idx == 0)):
+        # Group and element selectors
+        group, element = group_element_selectors(idx)
+        
+        # ROI selection
+        roi_changed = handle_image_selection(image, key=f"usaf_image_{idx}")
+        if roi_changed:
+            st.rerun()
+            
+        roi = display_roi_info(image)
+        keys = get_image_session_keys(idx)
+        
+        # Analysis section
+        if roi and (roi != st.session_state.get(keys['analyzed_roi']) or 
+                   group != st.session_state.get(keys['last_group']) or 
+                   element != st.session_state.get(keys['last_element'])):
+            with st.spinner("Analyzing image..."):
+                from usaf_package.processing.image_processor import ImageProcessor
+                img_proc = ImageProcessor()
+                img_proc.load_image(temp_path)
+                img_proc.select_roi(roi)
+                profile = img_proc.get_line_profile()
+                from usaf_package.processing.profile_analyzer import ProfileAnalyzer
+                analyzer = ProfileAnalyzer()
+                results = analyzer.analyze_profile(
+                    profile=profile,
+                    group=group,
+                    element=element
+                )
+                results["raw_profile"] = profile.tolist() if hasattr(profile, 'tolist') else None
+                results["group"] = group
+                results["element"] = element
+                st.session_state[keys['analyzed_roi']] = roi
+                st.session_state[keys['analysis_results']] = results
+                st.session_state[keys['last_group']] = group
+                st.session_state[keys['last_element']] = element
+        
+        # Results and visualization
+        if st.session_state.get(keys['analysis_results']):
+            results = st.session_state[keys['analysis_results']]
+            
+            # Create two columns for visualization
+            viz_col1, viz_col2 = st.columns([1, 1])
+            
+            with viz_col1:
+                if roi:
+                    roi_x, roi_y, roi_width, roi_height = roi
+                    img_with_roi = image.copy()
+                    cv2.rectangle(
+                        img_with_roi,
+                        (int(roi_x), int(roi_y)),
+                        (int(roi_x + roi_width), int(roi_y + roi_height)),
+                        (255, 0, 0),
+                        2
+                    )
+                    st.image(img_with_roi, caption="Selected Region", use_container_width=True)
+            
+            with viz_col2:
+                if roi:
+                    roi_image = extract_roi_image(image, roi)
+                    st.image(roi_image, caption="Zoomed View", use_container_width=True)
+            
+            # Metrics row below images
+            display_metrics_row(results)
+            
+            # Analysis
+            display_line_pair_expander(results)
+            
+            # Combined plot
+            if roi:
+                from usaf_package.processing.image_processor import ImageProcessor
+                img_proc = ImageProcessor()
+                img_proc.load_image(temp_path)
+                img_proc.select_roi(roi)
+                profile = img_proc.get_line_profile()
+                st.pyplot(combined_profile_and_annotated_roi_figure(roi_image, profile, results, group, element))
+                st.markdown("<div style='text-align:center; font-size:1.1em; margin-top:0.5em;'><b>ROI with Boundaries and Intensity Profile</b></div>", unsafe_allow_html=True)
+
+# ----------------------
+# Main App Logic
+# ----------------------
+def run_streamlit_app():
+    """Main Streamlit application function with a compact, efficient UI and per-image controls/results."""
+    try:
         st.set_page_config(
             page_title="USAF 1951 Resolution Target Analyzer",
             page_icon="🔬",
             layout="wide",
             initial_sidebar_state="expanded"
         )
-        
-        # Initialize session state
         initialize_session_state()
+        st.markdown("<h2 style='margin-bottom:0.5em'>USAF 1951 Resolution Target Analyzer</h2>", unsafe_allow_html=True)
+        left_col, right_col = st.columns([1, 2])
         
-        # Setup sidebar and get parameters
-        params = setup_sidebar()
-        
-        # Handle reset button
-        if params.get("reset_roi"):
-            reset_session_state()
-            st.rerun()
-        
-        # Main content area
-        st.title("USAF 1951 Resolution Target Analyzer")
-        
-        # Try to load default image if no file uploaded
-        uploaded_file = params.get("uploaded_file")
-        if uploaded_file is None:
-            uploaded_file = load_default_image()
-            if uploaded_file:
-                st.sidebar.success(f"Loaded default image: {os.path.basename(DEFAULT_IMAGE_PATH)}")
-        
-        # Process image if available
-        if uploaded_file:
-            # Process the uploaded image
-            image, temp_path = process_uploaded_file(uploaded_file)
+        with left_col:
+            # File uploader in the left column
+            uploaded_files = st.file_uploader(
+                "Upload USAF target image(s)",
+                type=["jpg", "jpeg", "png", "tif", "tiff"],
+                accept_multiple_files=True,
+                help="Select one or more images containing a USAF 1951 resolution target"
+            )
             
-            if image is not None:
-                # Main content in columns
-                col1, col2 = st.columns([3, 1])
-                
-                with col1:
-                    # Image display with ROI selection
-                    st.subheader("Image")
-                    if handle_image_selection(image):
-                        st.rerun()
-                
-                with col2:
-                    # ROI information
-                    st.subheader("Selected ROI")
-                    roi = display_roi_info(image)
-                
-                # Run analysis if we have a valid ROI
-                if roi and roi != st.session_state.analyzed_roi:
-                    with st.spinner("Analyzing image..."):
-                        # Prepare configuration and run analysis
-                        config = prepare_config_from_parameters(params)
-                        # Add profile extraction settings to config
-                        config.update({
-                            "profile_method": params.get("profile_method", "ROI Average"),
-                            "smooth_profile": params.get("smooth_profile", True)
-                        })
-                        
-                        from ..processing.image_processor import ImageProcessor
-                        img_proc = ImageProcessor(config)
-                        img_proc.load_image(temp_path)
-                        img_proc.select_roi(roi)
-                        
-                        # Get profile with selected orientation and method
-                        profile_position = params.get("profile_position")
-                        if profile_position is not None:
-                            # Convert percentage to pixel position
-                            if params.get("orientation") == "horizontal":
-                                # For horizontal profile, position is y-coordinate
-                                roi_height = roi[3]  # roi = (x, y, width, height)
-                                line_position = int((profile_position / 100.0) * roi_height)
-                            else:
-                                # For vertical profile, position is x-coordinate
-                                roi_width = roi[2]
-                                line_position = int((profile_position / 100.0) * roi_width)
-                            
-                            profile = img_proc.get_line_profile(
-                                params.get("orientation"),
-                                line_position=line_position
-                            )
-                        else:
-                            profile = img_proc.get_line_profile(params.get("orientation"))
-                        
-                        # Use new peak/valley detection
-                        peaks, valleys = img_proc.detect_peaks_and_valleys(
-                            profile, 
-                            min_distance=params.get("min_distance", 15),
-                            prominence=params.get("sensitivity", 0.2)
-                        )
-                        
-                        from ..processing.profile_analyzer import ProfileAnalyzer
-                        analyzer = ProfileAnalyzer()
-                        results = analyzer.analyze_profile(
-                            profile=profile,
-                            peak_positions=peaks,
-                            valley_positions=valleys,
-                            group=params.get("group", 2),
-                            element=params.get("element", 3)
-                        )
-                        
-                        # Add additional info to results
-                        results["raw_profile"] = profile.tolist() if hasattr(profile, 'tolist') else None
-                        results["peak_positions"] = peaks
-                        results["valley_positions"] = valleys
-                        results["orientation"] = params.get("orientation")
-                        results["profile_method"] = params.get("profile_method")
-                        results["profile_position"] = params.get("profile_position")
-                        
-                        st.session_state.analyzed_roi = roi
-                        st.session_state.analysis_results = results
-                
-                # Display results if available
-                if st.session_state.analysis_results:
-                    results = st.session_state.analysis_results
-                    roi_image = extract_roi_image(image, roi)
-                    display_analysis_results(results, roi_image)
-                    save_analysis_results(results)
-            else:
-                st.error("Failed to load image. Please check the file format.")
-        else:
-            # Welcome screen
-            display_welcome_screen()
+            # Add default image support
+            if not uploaded_files and load_default_image():
+                default_img_path = load_default_image()
+                st.info(f"Using default image: {os.path.basename(default_img_path)}")
+                uploaded_files = [default_img_path]
             
+            # Welcome screen if no images
+            if not uploaded_files:
+                display_welcome_screen()
+                return
+        
+        with right_col:
+            # Process each uploaded image
+            for idx, uploaded_file in enumerate(uploaded_files):
+                image, temp_path = process_uploaded_file(uploaded_file)
+                if image is not None:
+                    # Each image gets its own expander with all controls and analysis
+                    analyze_and_display_image(idx, uploaded_file, image, temp_path)
+                else:
+                    st.error(f"Failed to load image: {getattr(uploaded_file, 'name', f'Image {idx+1}')}. Please check the file format.")
+    
     except Exception as e:
         st.error(f"Error: {e}")
         st.info("For detailed error information, set DEBUG=1 in environment variables.") 

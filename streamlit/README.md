@@ -90,7 +90,6 @@ from usaf_package.main import run_analysis
 
 # Run analysis with custom parameters
 results = run_analysis(
-    config={'headless': True, 'save_results': True},
     image_path='path/to/image.tif',
     roi=(100, 100, 200, 200),
     profile_position=50,
@@ -127,7 +126,7 @@ usaf_package/
     ├── __init__.py
     ├── cli.py               # Command-line interface utilities
     ├── helpers.py           # Streamlit UI helper functions
-    └── image_tools.py       # Image processing for web interface
+    └── streamlit_helpers.py # Streamlit-specific utility functions (file upload, ROI, CSV export)
 ```
 
 ## License
@@ -181,3 +180,5 @@ The codebase has been refactored to increase modularity, reduce complexity, and 
 ### Usage Notes
 
 No changes in functionality or user experience were introduced. All existing features continue to work as before, but the codebase is now more modular, easier to maintain, and better organized.
+
+*Note: The previously unused `image_tools.py` has been removed as part of this cleanup. All Streamlit-specific helpers are now in `streamlit_helpers.py`.*

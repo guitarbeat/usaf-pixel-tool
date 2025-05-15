@@ -10,36 +10,41 @@ import tempfile
 import numpy as np
 import cv2
 import streamlit as st
-from typing import Tuple, Optional, Any
+from typing import Tuple, Optional, Any, Union
 
-def process_uploaded_file(uploaded_file):
+def process_uploaded_file(uploaded_file: Union[Any, str]) -> Tuple[Optional[np.ndarray], Optional[str]]:
     """
-    Process an uploaded file from Streamlit's file uploader.
+    Process an uploaded file from Streamlit's file uploader or a file path.
     
     Args:
-        uploaded_file: Streamlit UploadedFile object
+        uploaded_file: Streamlit UploadedFile object or a file path (str)
         
     Returns:
         tuple: (image_array, temp_file_path) or (None, None) if processing fails
     """
     if uploaded_file is None:
         return None, None
-        
+    
     try:
-        # Create a temporary file to save the uploaded content
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as temp_file:
-            temp_file.write(uploaded_file.getvalue())
-            temp_path = temp_file.name
-        
-        # Read the image with OpenCV
-        image = cv2.imread(temp_path)
+        if isinstance(uploaded_file, str):
+            # uploaded_file is a file path
+            if not os.path.exists(uploaded_file):
+                return None, None
+            image = cv2.imread(uploaded_file)
+            temp_path = uploaded_file
+        else:
+            # Assume uploaded_file is a Streamlit UploadedFile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as temp_file:
+                temp_file.write(uploaded_file.getvalue())
+                temp_path = temp_file.name
+            image = cv2.imread(temp_path)
         
         # Convert to grayscale if it's a color image
-        if len(image.shape) == 3:
+        if image is not None and len(image.shape) == 3:
             gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
             gray_image = image
-            
+        
         return gray_image, temp_path
         
     except Exception as e:
@@ -48,67 +53,6 @@ def process_uploaded_file(uploaded_file):
         if 'temp_path' in locals() and os.path.exists(temp_path):
             os.remove(temp_path)
         return None, None
-        
-def create_dummy_file_object(default_path):
-    """
-    Create a dummy file object to simulate a file upload for default images.
-    
-    Args:
-        default_path: Path to the default image file
-        
-    Returns:
-        object: A file-like object compatible with Streamlit's file uploader
-    """
-    if not os.path.exists(default_path):
-        return None
-        
-    class DummyUploadedFile:
-        def __init__(self, path):
-            self.name = os.path.basename(path)
-            self.path = path
-            
-        def getvalue(self):
-            with open(self.path, 'rb') as f:
-                return f.read()
-    
-    return DummyUploadedFile(default_path)
-
-def prepare_config_from_parameters(params):
-    """
-    Prepare a configuration dictionary from UI parameters.
-    
-    Args:
-        params: Dictionary of UI parameters
-        
-    Returns:
-        dict: Configuration dictionary for analysis
-    """
-    from ..core.config import DEFAULT_CONFIG
-    
-    # Start with the default configuration
-    config = DEFAULT_CONFIG.copy()
-    
-    # Update image enhancement settings
-    config["image_enhancement"]["enabled"] = params.get("enhance_image", True)
-    
-    if params.get("enhancement_method"):
-        if params["enhancement_method"] == "CLAHE":
-            config["image_enhancement"]["apply_clahe"] = True
-            config["image_enhancement"]["denoise_method"] = "none"
-        elif params["enhancement_method"] == "Bilateral filter":
-            config["image_enhancement"]["denoise_method"] = "bilateral"
-        elif params["enhancement_method"] == "Non-local means":
-            config["image_enhancement"]["denoise_method"] = "nl_means"
-    
-    if "enhancement_strength" in params:
-        config["image_enhancement"]["denoise_strength"] = params["enhancement_strength"]
-    
-    # Add ML options
-    if "use_ml" in params:
-        config["profile_analysis"]["use_ml_quality_score"] = params["use_ml"]
-        config["ml_options"]["use_anomaly_detection"] = params["use_ml"]
-    
-    return config
 
 def extract_roi_image(image, roi):
     """
