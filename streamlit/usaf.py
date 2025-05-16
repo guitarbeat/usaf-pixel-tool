@@ -581,7 +581,7 @@ def display_welcome_screen():
     st.info("Please upload a USAF 1951 target image to begin analysis.")
     col1, col2 = st.columns([1, 2])
     with col1:
-        st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/9/92/USAF-1951.svg/1024px-USAF-1951.svg.png",
+        st.image("https://upload.wikimedia.org/wikipedia/commons/d/d6/1951usaf_test_target.jpg",
                  caption="Example USAF 1951 Target", use_container_width=True)
     with col2:
         st.subheader("USAF 1951 Target Format")
