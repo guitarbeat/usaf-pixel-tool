@@ -29,7 +29,6 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 
 import streamlit as st
 
-division_by_zero = 1 / 0
 sentry_sdk.init(
     dsn="https://90e0b71a002f0517b8bcae83d023e8ff@o4509363227197440.ingest.us.sentry.io/4509363256033280",
     # Add data like request headers and IP for users,
@@ -97,8 +96,13 @@ RGB_CHANNELS = 3
 MIN_ARRAY_DIMS = 2
 MIN_ARRAY_LENGTH = 2
 MIN_ARRAY_SIZE = 2
-MIN_TRANSITIONS = 2
 MIN_PAIRS = 2
+MIN_LINE_PAIRS = 2
+MIN_BOUNDARIES = 3
+ROI_COORDS_LENGTH = 4
+
+# USAF Target constants
+MAX_USAF_ELEMENT = 6
 
 # --- Utility Functions ---
 
@@ -573,32 +577,37 @@ def process_uploaded_file(uploaded_file) -> tuple[np.ndarray | None, str | None]
         return None, None
 
     try:
-        # Get image processing settings
-        unique_id = get_unique_id_for_image(uploaded_file)
-        settings = _get_image_settings(unique_id)
-
-        if not isinstance(uploaded_file, str):
-            return _handle_uploaded_file(uploaded_file, settings, unique_id)
-
-        if not os.path.exists(uploaded_file):
-            st.error(f"File not found: {uploaded_file}")
-            return None, None
-
-        ext = os.path.splitext(uploaded_file)[1].lower()
-
-        # Load image based on file type
-        image, file_path = (
-            _load_tiff_image(uploaded_file)
-            if ext in [".tif", ".tiff"]
-            else _load_standard_image(uploaded_file)
-        )
-        if image is not None:
-            return _process_image(image, settings, unique_id, file_path)
-        return None, None
+        return _extracted_from_process_uploaded_file_16(uploaded_file)
     except Exception as e:
         logger.error(f"Error processing file: {e}")
         st.error(f"Error processing file: {e}")
         return None, None
+
+
+# TODO Rename this here and in `process_uploaded_file`
+def _extracted_from_process_uploaded_file_16(uploaded_file):
+    # Get image processing settings
+    unique_id = get_unique_id_for_image(uploaded_file)
+    settings = _get_image_settings(unique_id)
+
+    if not isinstance(uploaded_file, str):
+        return _handle_uploaded_file(uploaded_file, settings, unique_id)
+
+    if not os.path.exists(uploaded_file):
+        st.error(f"File not found: {uploaded_file}")
+        return None, None
+
+    ext = os.path.splitext(uploaded_file)[1].lower()
+
+    # Load image based on file type
+    image, file_path = (
+        _load_tiff_image(uploaded_file)
+        if ext in [".tif", ".tiff"]
+        else _load_standard_image(uploaded_file)
+    )
+    if image is not None:
+        return _process_image(image, settings, unique_id, file_path)
+    return None, None
 
 
 def extract_roi_image(
@@ -759,7 +768,7 @@ def extract_alternating_patterns(transitions, transition_types):
     Returns:
         tuple of (pattern_transitions, pattern_types)
     """
-    if len(transitions) <= MIN_TRANSITIONS:
+    if len(transitions) <= MIN_LINE_PAIRS:
         return transitions, transition_types
 
     # Try to identify proper line pair transitions by looking for alternating patterns
@@ -914,7 +923,7 @@ def find_line_pair_boundaries_threshold(profile, threshold):
     dark_bar_starts = [
         i
         for i in range(1, len(above_threshold))
-        if above_threshold[i - 1] == True and above_threshold[i] == False
+        if above_threshold[i - 1] is True and above_threshold[i] is False
     ]
     # Create corresponding transition types (all -1 for light-to-dark)
     transition_types = [-1] * len(dark_bar_starts)
@@ -1304,7 +1313,7 @@ class ProfileVisualizer:
             "",
             xy=(x_start, y_pos),
             xytext=(x_end, y_pos),
-            arrowprops=dict(arrowstyle="-", color=color, linewidth=line_width),
+            arrowprops={"arrowstyle": "-", "color": color, "linewidth": line_width},
         )
 
         # Draw tick marks on ends
@@ -1312,13 +1321,13 @@ class ProfileVisualizer:
             "",
             xy=(x_start, y_pos),
             xytext=(x_start, y_pos + tick_size),
-            arrowprops=dict(arrowstyle="-", color=color, linewidth=line_width),
+            arrowprops={"arrowstyle": "-", "color": color, "linewidth": line_width},
         )
         ax.annotate(
             "",
             xy=(x_end, y_pos),
             xytext=(x_end, y_pos + tick_size),
-            arrowprops=dict(arrowstyle="-", color=color, linewidth=line_width),
+            arrowprops={"arrowstyle": "-", "color": color, "linewidth": line_width},
         )
 
     def annotate_line_pairs(self, ax, line_pairs, roi_img):
@@ -1385,7 +1394,7 @@ class ProfileVisualizer:
             <div style='text-align:center; font-family: "Times New Roman", Times, serif;'>
                 <p style='margin-bottom:0.3rem; font-size:1.25rem;'><b>Figure: Intensity Profile Analysis of USAF Target</b></p>
                 <p style='margin-top:0; font-size:1.0rem; color:#333;'>
-                    Group {group}, Element {element} with theoretical line pair width of {lp_width_um:.2f} µm 
+                    Group {group}, Element {element} with theoretical line pair width of {lp_width_um:.2f} µm
                     {f"({lp_per_mm_str})" if lp_per_mm_str else ""}.<br>
                     <b>Max Intensity Profile</b> with <b>Edge Detection Method:</b> <span style='color:#0074D9'>{method_str}</span><br>
                     Each line pair consists of one complete dark bar and one complete light bar.<br>
@@ -1580,15 +1589,15 @@ class ImageProcessor:
 
                 # Convert BGR to RGB if needed (OpenCV loads as BGR)
                 if (
-                    len(self.original_image.shape) == 3
-                    and self.original_image.shape[2] == 3
+                    len(self.original_image.shape) == RGB_CHANNELS
+                    and self.original_image.shape[2] == RGB_CHANNELS
                 ):
                     self.original_image = cv2.cvtColor(
                         self.original_image, cv2.COLOR_BGR2RGB
                     )
 
                 # Create grayscale version of the original image
-                if len(self.original_image.shape) > 2:
+                if len(self.original_image.shape) > MIN_IMAGE_DIMS:
                     self.original_grayscale = cv2.cvtColor(
                         self.original_image, cv2.COLOR_RGB2GRAY
                     )
@@ -1620,7 +1629,7 @@ class ImageProcessor:
             )
 
             # Create grayscale version of the processed image
-            if len(self.image.shape) > 2:
+            if len(self.image.shape) > MIN_IMAGE_DIMS:
                 self.grayscale = cv2.cvtColor(self.image, cv2.COLOR_RGB2GRAY)
             else:
                 self.grayscale = self.image
@@ -1659,7 +1668,10 @@ class ImageProcessor:
         Returns:
             bool: True if ROI is valid, False otherwise
         """
-        if not isinstance(roi_coordinates, tuple) or len(roi_coordinates) != 4:
+        if (
+            not isinstance(roi_coordinates, tuple)
+            or len(roi_coordinates) != ROI_COORDS_LENGTH
+        ):
             logger.error(f"Invalid ROI coordinates format: {roi_coordinates}")
             return False
 
@@ -1822,10 +1834,9 @@ class ImageProcessor:
             self.detect_edges()
             # Step 2: Use only the best two line pairs
             self.line_pair_widths = []
-        self.line_pair_positions = []
-        if self.boundaries is not None and len(self.boundaries) >= 3:
+
+        if self.boundaries is not None and len(self.boundaries) >= MIN_BOUNDARIES:
             best_pairs, avg_width = find_best_two_line_pairs(self.boundaries)
-            self.line_pair_positions = best_pairs
             self.line_pair_widths = [end - start for start, end in best_pairs]
             self.avg_line_pair_width = avg_width
             logger.debug(
@@ -1882,7 +1893,7 @@ class ImageProcessor:
         element: int,
         use_max: bool = True,
         edge_method: str = "original",
-        threshold: float = None,
+        threshold: float | None = None,
         roi_rotation: int = 0,
         **processing_params,
     ) -> dict:
@@ -1978,38 +1989,6 @@ class ImageProcessor:
 
 
 # --- Streamlit UI Functions ---
-
-
-def group_element_selectors(idx, default_group=None, default_element=None):
-    if default_group is None:
-        default_group = DEFAULT_GROUP
-    if default_element is None:
-        default_element = DEFAULT_ELEMENT
-    keys = get_image_session_keys(idx)
-    if keys["group"] not in st.session_state:
-        st.session_state[keys["group"]] = default_group
-    if keys["element"] not in st.session_state:
-        st.session_state[keys["element"]] = default_element
-    if keys["coordinates"] not in st.session_state:
-        st.session_state[keys["coordinates"]] = None
-    col_g, col_e = st.columns(2)
-    with col_g:
-        group = st.number_input(
-            "Group",
-            value=st.session_state[keys["group"]],
-            min_value=-2,
-            max_value=9,
-            key=keys["group"],
-        )
-    with col_e:
-        element = st.number_input(
-            "Element",
-            value=st.session_state[keys["element"]],
-            min_value=1,
-            max_value=6,
-            key=keys["element"],
-        )
-    return group, element
 
 
 def display_roi_info(idx: int, image=None) -> tuple[int, int, int, int] | None:
@@ -2349,7 +2328,7 @@ def analyze_and_display_image(idx, uploaded_file):
                     "Element",
                     options=["1", "2", "3", "4", "5", "6"],
                     index=int(default_element) - 1
-                    if 0 < int(default_element) <= 6
+                    if 0 < int(default_element) <= MAX_USAF_ELEMENT
                     else 0,
                     key=f"element_radio_{unique_id}_form",
                     horizontal=True,
@@ -2451,7 +2430,7 @@ def analyze_and_display_image(idx, uploaded_file):
                 )
                 new_rotation = rotation_options.index(selected_rotation)
 
-            if submit_clicked := st.form_submit_button(
+            if st.form_submit_button(
                 "Apply Settings & Analyze",
                 type="primary",
                 use_container_width=True,
@@ -2498,7 +2477,7 @@ def analyze_and_display_image(idx, uploaded_file):
             st.markdown("#### Select ROI on Image")
 
             # Always display the original image for ROI selection (no rotation)
-            roi_changed = handle_image_selection(
+            handle_image_selection(
                 idx, uploaded_file, pil_img, key=f"usaf_image_{idx}", rotation=0
             )
 
@@ -2643,7 +2622,7 @@ def analyze_and_display_image(idx, uploaded_file):
         # Get current ROI rotation
         roi_rotation = st.session_state.get(roi_rotation_key, 0)
 
-        if should_analyze := (
+        if (
             st.session_state.get(settings_changed_key, False)
             and current_selected_roi_tuple is not None
             and roi_is_valid
