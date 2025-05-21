@@ -11,19 +11,29 @@ USAF 1951 Resolution Target Calculator (v2)
 A visually improved version for summary images and output organization.
 '''
 
-from __future__ import division
-import math
-import sys
-import os
 import datetime
+import math
+import os
+import sys
+
 from ij import IJ, ImagePlus, WindowManager
-from ij.gui import GenericDialog, Plot, Line, Overlay, Roi, TextRoi, WaitForUserDialog, ProfilePlot, NonBlockingGenericDialog
+from ij.gui import (
+    GenericDialog,
+    Line,
+    NonBlockingGenericDialog,
+    Overlay,
+    Plot,
+    ProfilePlot,
+    Roi,
+    TextRoi,
+    WaitForUserDialog,
+)
+from ij.io import DirectoryChooser, FileSaver
 from ij.process import Blitter
 from java.awt import Color, Font
-from ij.io import FileSaver, DirectoryChooser
+from java.awt.event import AdjustmentListener
 from java.io import File
 from java.lang import System
-from java.awt.event import AdjustmentListener
 
 DEBUG = True
 SAVE_RESULTS = True
@@ -170,7 +180,7 @@ class ROIHandler:
             def adjustmentValueChanged(self, event):
                 angle = slider.getValue()
                 preview_imp.setProcessor(roi_imp.getProcessor().duplicate())
-                IJ.run(preview_imp, "Rotate...", "angle={} grid=1 interpolation=Bilinear".format(-angle))
+                IJ.run(preview_imp, "Rotate...", f"angle={-angle} grid=1 interpolation=Bilinear")
                 preview_imp.updateAndDraw()
         slider.addAdjustmentListener(SliderListener())
         gd.showDialog()
@@ -183,7 +193,7 @@ class ROIHandler:
         if use_auto:
             final_angle = self.angle
         if abs(final_angle) > 0.01:
-            IJ.run(roi_imp, "Rotate...", "angle={} grid=1 interpolation=Bilinear".format(-final_angle))
+            IJ.run(roi_imp, "Rotate...", f"angle={-final_angle} grid=1 interpolation=Bilinear")
         preview_imp.close()
         self.angle = final_angle
         self.roi_image = roi_imp
@@ -207,7 +217,7 @@ class ROIHandler:
         return averaged_profile, self.angle
     def _show_profiles_plot(self, individual_profiles, averaged_profile):
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        base_filename = "USAF_Profile_Plot_{}.png".format(timestamp)
+        base_filename = f"USAF_Profile_Plot_{timestamp}.png"
         plot_filename = get_save_path(base_filename) if SAVE_RESULTS else None
         plot = Plot("Line Profiles", "Distance (pixels)", "Intensity")
         plot.setLimits(0, len(averaged_profile), min(averaged_profile)*0.9, max(averaged_profile)*1.1)
@@ -229,7 +239,7 @@ class ROIHandler:
             x1 = valleys[i]
             x2 = valleys[i+1]
             plot.drawLine(x1, y_pos, x2, y_pos)
-            plot.addLabel((x1+x2)/2, y_pos, "{:.1f}px".format(x2-x1))
+            plot.addLabel((x1+x2)/2, y_pos, f"{x2-x1:.1f}px")
         plot.addLegend("Individual Profiles\nAveraged Profile\nValley Centers\nLine Pair Width")
         if SAVE_RESULTS:
             plotImage = plot.makeHighResolution("USAF Profile", 4.0, True, ImagePlus.COLOR_RGB)
@@ -268,9 +278,9 @@ class USAFTarget:
     @staticmethod
     def validate_parameters(group, element):
         if not (USAFTarget.MIN_GROUP <= group <= USAFTarget.MAX_GROUP):
-            raise ValueError("Group must be between {} and {}".format(USAFTarget.MIN_GROUP, USAFTarget.MAX_GROUP))
+            raise ValueError(f"Group must be between {USAFTarget.MIN_GROUP} and {USAFTarget.MAX_GROUP}")
         if not (USAFTarget.MIN_ELEMENT <= element <= USAFTarget.MAX_ELEMENT):
-            raise ValueError("Element must be between {} and {}".format(USAFTarget.MIN_ELEMENT, USAFTarget.MAX_ELEMENT))
+            raise ValueError(f"Element must be between {USAFTarget.MIN_ELEMENT} and {USAFTarget.MAX_ELEMENT}")
         return True
 
 class ResultsCalculator:
@@ -347,7 +357,7 @@ def get_user_parameters():
     }
 
 def show_selection_dialog(selection_type):
-    message = ('Draw {} across ALL THREE line pairs\n'.format(selection_type) +
+    message = (f'Draw {selection_type} across ALL THREE line pairs\n' +
               '1. Include all three dark bars\n' +
               '2. Draw perpendicular to the bars\n' +
               '3. Selection should be centered on the bars')
@@ -363,7 +373,7 @@ def update_image_calibration(imp, microns_per_pixel):
 
 def save_results_to_csv(results, params):
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    base_filename = "USAF_Resolution_Results_{}.csv".format(timestamp)
+    base_filename = f"USAF_Resolution_Results_{timestamp}.csv"
     filename = get_save_path(base_filename)
     content = [
         "USAF Resolution Target Calculator Results",
@@ -398,7 +408,7 @@ def run_script():
                 imp = WindowManager.getImage(image_titles[0])
             else:
                 choice = IJ.showMessageWithCancel(
-                    "No Image Open", 
+                    "No Image Open",
                     "No image is currently open. Would you like to open an image now?")
                 if choice:
                     IJ.run("Open...", "")
@@ -440,7 +450,7 @@ def run_script():
             # Use the new beautiful summary image
             profile_plot_img = getattr(roi_handler, 'last_profile_plot_img', None)
             create_beautiful_summary_image(imp, results, params, roi_handler, profile_plot_img)
-            IJ.showMessage("USAF Resolution Calculator", 
+            IJ.showMessage("USAF Resolution Calculator",
                           "Analysis complete!\n\n" +
                           "Results and images have been saved to:\n" +
                           get_output_subdir())
@@ -465,7 +475,7 @@ def create_beautiful_summary_image(imp, results, params, roi_handler, profile_pl
     - Optional: inset profile plot
     """
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    base_filename = "USAF_Summary_Beautiful_{}.png".format(timestamp)
+    base_filename = f"USAF_Summary_Beautiful_{timestamp}.png"
     summary_filename = get_save_path(base_filename)
     summary_imp = imp.duplicate()
     summary_imp.setTitle("USAF Summary (Beautiful)")
@@ -520,7 +530,7 @@ def create_beautiful_summary_image(imp, results, params, roi_handler, profile_pl
         vline.setStrokeColor(Color.CYAN)
         vline.setStrokeWidth(3)
         overlay.add(vline)
-        vlabel = TextRoi(valley+4, 10, "V{}".format(idx+1))
+        vlabel = TextRoi(valley+4, 10, f"V{idx+1}")
         vlabel.setColor(Color.CYAN)
         vlabel.setFont(Font("SansSerif", Font.BOLD, 16))
         overlay.add(vlabel)
@@ -534,7 +544,7 @@ def create_beautiful_summary_image(imp, results, params, roi_handler, profile_pl
         arrow.setStrokeWidth(4)
         overlay.add(arrow)
         dist = x2-x1
-        dist_label = TextRoi((x1+x2)//2-10, y_arrow-30, "{:.1f}px".format(dist))
+        dist_label = TextRoi((x1+x2)//2-10, y_arrow-30, f"{dist:.1f}px")
         dist_label.setColor(Color.YELLOW)
         dist_label.setFont(Font("SansSerif", Font.BOLD, 16))
         overlay.add(dist_label)
@@ -559,7 +569,7 @@ def create_beautiful_summary_image(imp, results, params, roi_handler, profile_pl
     FileSaver(flatImp).saveAsPng(summary_filename)
     IJ.log("Beautiful summary image saved to: " + summary_filename)
     summary_imp.close()
-    return summary_filename 
+    return summary_filename
 
 if __name__ in ['__builtin__','__main__']:
     run_script()

@@ -1,5 +1,6 @@
 import os
 
+
 def remove_empty_dirs(root_dir):
     # Walk the directory tree in bottom-up order
     for dirpath, dirnames, filenames in os.walk(root_dir, topdown=False):
