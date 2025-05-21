@@ -2298,9 +2298,8 @@ def create_analysis_settings_form(state_vars, keys, roi_tuple, image):
     """Create form for analysis settings."""
     unique_id = state_vars["autoscale_key"].split("_")[1]
 
-    # Get the most up-to-date ROI coordinates before calculating threshold
-    current_roi_tuple = display_roi_info(None, image)
-    default_threshold, max_threshold = get_default_threshold(current_roi_tuple, image)
+    # Use the provided ROI tuple for threshold calculation
+    default_threshold, max_threshold = get_default_threshold(roi_tuple, image)
 
     with st.form(key=f"analysis_settings_form_{unique_id}"):
         st.subheader("Analysis Settings")
@@ -2659,9 +2658,7 @@ def run_image_analysis(keys, state_vars, image, temp_path, current_roi_tuple):
     # Get current ROI rotation
     roi_rotation = st.session_state.get(state_vars["roi_rotation_key"], 0)
 
-    # Get the most up-to-date ROI coordinates
-    current_roi_tuple = display_roi_info(None, image)
-
+    # Using the ROI tuple that was passed in from analyze_and_display_image
     if (
         st.session_state.get(state_vars["settings_changed_key"], False)
         and current_roi_tuple is not None
