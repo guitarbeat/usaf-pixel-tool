@@ -2275,6 +2275,7 @@ def get_default_threshold(roi_tuple, image):
     if not roi_tuple:
         return default_threshold, max_threshold
 
+    # Get the most up-to-date ROI from the provided coordinates
     temp_roi = extract_roi_image(image, roi_tuple)
     if temp_roi is None:
         return default_threshold, max_threshold
