@@ -78,6 +78,17 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 
+# --- Constants ---
+# Image dimensions and channels
+MIN_IMAGE_DIMS = 2
+MAX_IMAGE_CHANNELS = 4
+
+# Array dimensions and indices
+MIN_ARRAY_DIMS = 2
+MIN_ARRAY_LENGTH = 2
+MIN_ARRAY_SIZE = 2
+MIN_TRANSITIONS = 2
+MIN_PAIRS = 2
 
 # --- Utility Functions ---
 
@@ -174,7 +185,7 @@ def _process_multichannel_image(
     Returns:
         Processed image array
     """
-    if image.ndim <= 2 or image.shape[-1] > 4:
+    if image.ndim <= MIN_IMAGE_DIMS or image.shape[-1] > MAX_IMAGE_CHANNELS:
         return process_func(image, **kwargs)
 
     result = np.zeros_like(image, dtype=np.uint8)
@@ -681,7 +692,7 @@ def find_best_two_line_pairs(dark_bar_starts):
         for i in range(len(dark_bar_starts) - 1)
     ]
     widths = [end - start for start, end in pairs]
-    if len(widths) < 2:
+    if len(widths) < MIN_ARRAY_LENGTH:
         return [], 0.0  # Not enough pairs
     # Find the two widths that are closest to each other
     min_diff = float("inf")
@@ -694,7 +705,7 @@ def find_best_two_line_pairs(dark_bar_starts):
                 best_indices = (i, j)
     # Get the best two pairs and their average width
     best_pairs = [pairs[best_indices[0]], pairs[best_indices[1]]]
-    avg_width = (widths[best_indices[0]] + widths[best_indices[1]]) / 2
+    avg_width = (widths[best_indices[0]] + widths[best_indices[1]]) / MIN_ARRAY_SIZE
     return best_pairs, avg_width
 
 
@@ -740,7 +751,7 @@ def extract_alternating_patterns(transitions, transition_types):
     Returns:
         tuple of (pattern_transitions, pattern_types)
     """
-    if len(transitions) <= 2:
+    if len(transitions) <= MIN_TRANSITIONS:
         return transitions, transition_types
 
     # Try to identify proper line pair transitions by looking for alternating patterns
@@ -1125,7 +1136,7 @@ class ProfileVisualizer:
     def create_figure(self, figsize=(8, 8), dpi=150):
         """Create a square matplotlib figure with properly configured layout"""
         fig = plt.figure(figsize=figsize, dpi=dpi, facecolor="white")
-        gs = fig.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.05)
+        gs = fig.add_gridspec(MIN_ARRAY_DIMS, 1, height_ratios=[1, 1], hspace=0.05)
 
         # Set explicit figure margins to avoid tight_layout issues
         fig.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.05)
@@ -1275,7 +1286,7 @@ class ProfileVisualizer:
         line_pairs = []
         for j, (start_pos, end_pos) in enumerate(best_pairs):
             width_px = end_pos - start_pos
-            if width_px >= 5:
+            if width_px >= MIN_PAIRS:
                 line_pairs.append((start_pos, end_pos, width_px, j))
         return line_pairs
 
