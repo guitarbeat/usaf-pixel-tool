@@ -19,6 +19,7 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import sentry_sdk
 import streamlit_nested_layout  # type: ignore  # noqa: F401
 import tifffile
 from matplotlib import patheffects
@@ -27,6 +28,14 @@ from skimage import exposure, img_as_ubyte
 from streamlit_image_coordinates import streamlit_image_coordinates
 
 import streamlit as st
+
+division_by_zero = 1 / 0
+sentry_sdk.init(
+    dsn="https://90e0b71a002f0517b8bcae83d023e8ff@o4509363227197440.ingest.us.sentry.io/4509363256033280",
+    # Add data like request headers and IP for users,
+    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+    send_default_pii=True,
+)
 
 # --- File Paths ---
 DEFAULT_IMAGE_PATH = os.path.expanduser(
@@ -82,6 +91,7 @@ logging.basicConfig(
 # Image dimensions and channels
 MIN_IMAGE_DIMS = 2
 MAX_IMAGE_CHANNELS = 4
+RGB_CHANNELS = 3
 
 # Array dimensions and indices
 MIN_ARRAY_DIMS = 2
@@ -396,10 +406,10 @@ def _ensure_rgb_image(image: np.ndarray) -> np.ndarray:
     Returns:
         RGB image array
     """
-    if image.ndim == 2:
-        return np.stack([image] * 3, axis=-1)
+    if image.ndim == MIN_IMAGE_DIMS:
+        return np.stack([image] * RGB_CHANNELS, axis=-1)
     elif image.shape[-1] == 1:
-        return np.repeat(image, 3, axis=-1)
+        return np.repeat(image, RGB_CHANNELS, axis=-1)
     return image
 
 
@@ -453,7 +463,7 @@ def _load_standard_image(file_path: str) -> tuple[np.ndarray | None, str | None]
                 f"Loaded image: shape={image.shape}, dtype={image.dtype}, range={np.min(image)}-{np.max(image)}"
             )
             # Convert BGR to RGB if needed (OpenCV loads as BGR)
-            if len(image.shape) == 3 and image.shape[2] == 3:
+            if len(image.shape) == RGB_CHANNELS and image.shape[2] == RGB_CHANNELS:
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             return image, file_path
         else:
@@ -567,25 +577,23 @@ def process_uploaded_file(uploaded_file) -> tuple[np.ndarray | None, str | None]
         unique_id = get_unique_id_for_image(uploaded_file)
         settings = _get_image_settings(unique_id)
 
-        # Handle string path or uploaded file object
-        if isinstance(uploaded_file, str):
-            if not os.path.exists(uploaded_file):
-                st.error(f"File not found: {uploaded_file}")
-                return None, None
-
-            ext = os.path.splitext(uploaded_file)[1].lower()
-
-            # Load image based on file type
-            if ext in [".tif", ".tiff"]:
-                image, file_path = _load_tiff_image(uploaded_file)
-            else:
-                image, file_path = _load_standard_image(uploaded_file)
-
-            if image is not None:
-                return _process_image(image, settings, unique_id, file_path)
-        else:
+        if not isinstance(uploaded_file, str):
             return _handle_uploaded_file(uploaded_file, settings, unique_id)
 
+        if not os.path.exists(uploaded_file):
+            st.error(f"File not found: {uploaded_file}")
+            return None, None
+
+        ext = os.path.splitext(uploaded_file)[1].lower()
+
+        # Load image based on file type
+        image, file_path = (
+            _load_tiff_image(uploaded_file)
+            if ext in [".tif", ".tiff"]
+            else _load_standard_image(uploaded_file)
+        )
+        if image is not None:
+            return _process_image(image, settings, unique_id, file_path)
         return None, None
     except Exception as e:
         logger.error(f"Error processing file: {e}")
@@ -1188,10 +1196,7 @@ class ProfileVisualizer:
             return
 
         # Build title lines
-        title_lines = []
-
-        # Add group and element info
-        title_lines.append(self._format_group_element_title(group, element))
+        title_lines = [self._format_group_element_title(group, element)]
 
         # Add line pairs info
         if line_pairs_info := self._format_line_pairs_info(
@@ -2824,7 +2829,7 @@ def run_streamlit_app():
             st.markdown("---")
             st.markdown("### Analysis Tips")
             st.info("""
-            **Image Rotation**: Each image has a rotation slider to help align line pairs horizontally for better analysis. 
+            **Image Rotation**: Each image has a rotation slider to help align line pairs horizontally for better analysis.
             Use this feature when your USAF target is tilted.
             """)
 
