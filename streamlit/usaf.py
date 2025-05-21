@@ -100,6 +100,7 @@ MIN_PAIRS = 2
 MIN_LINE_PAIRS = 2
 MIN_BOUNDARIES = 3
 ROI_COORDS_LENGTH = 4
+MIN_PROPER_TRANSITIONS = 2  # Minimum number of transitions needed for pattern detection
 
 # USAF Target constants
 MAX_USAF_ELEMENT = 6
@@ -577,15 +578,15 @@ def process_uploaded_file(uploaded_file) -> tuple[np.ndarray | None, str | None]
         return None, None
 
     try:
-        return _extracted_from_process_uploaded_file_16(uploaded_file)
+        return _process_uploaded_file_with_settings(uploaded_file)
     except Exception as e:
         logger.error(f"Error processing file: {e}")
         st.error(f"Error processing file: {e}")
         return None, None
 
 
-# TODO Rename this here and in `process_uploaded_file`
-def _extracted_from_process_uploaded_file_16(uploaded_file):
+# Renamed from _extracted_from_process_uploaded_file_16
+def _process_uploaded_file_with_settings(uploaded_file):
     # Get image processing settings
     unique_id = get_unique_id_for_image(uploaded_file)
     settings = _get_image_settings(unique_id)
@@ -793,7 +794,7 @@ def extract_alternating_patterns(transitions, transition_types):
             i += 1
 
     # If we found proper transitions, use them
-    if len(proper_transitions) >= 2:
+    if len(proper_transitions) >= MIN_PROPER_TRANSITIONS:
         return proper_transitions, proper_types
 
     return transitions, transition_types
@@ -1141,7 +1142,7 @@ class ProfileVisualizer:
         pixel_size_str = f"Pixel Size: $\\mathbf{{{pixel_size:.3f}}}$ µm/pixel"
 
         mag_str = (
-            f"Magnification: $\\mathbf{{{magnification:.1f}\\times}}$"
+            f"Magnification: $\\mathbf{{{magnification:.1f}x}}$"
             if magnification
             else ""
         )
@@ -1503,7 +1504,7 @@ class ProfileVisualizer:
                 )  # Increased linewidth
 
             # Find and annotate line pairs if we have enough boundaries
-            if len(boundaries) >= 2:
+            if len(boundaries) >= MIN_PROPER_TRANSITIONS:
                 line_pairs = self.find_line_pairs(boundaries, roi_img)
             self.annotate_line_pairs(ax_img, line_pairs, roi_img)
         else:
@@ -1562,58 +1563,56 @@ class ImageProcessor:
                 logger.error(f"Image file not found: {image_path}")
                 return False
             try:
-                # Load the image without any processing first
-                if image_path.lower().endswith((".tif", ".tiff")):
-                    try:
-                        with tifffile.TiffFile(image_path) as tif:
-                            if len(tif.pages) == 0:
-                                logger.error(f"TIFF file has no pages: {image_path}")
-                                return False
-                            self.original_image = tif.pages[0].asarray()
-                    except Exception as e:
-                        logger.error(f"Failed to load TIFF: {image_path} ({e})")
-                        return False
-                else:
-                    self.original_image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-                    if self.original_image is None:
-                        # If OpenCV fails, try PIL
-                        logger.info(
-                            f"OpenCV failed to load image, trying PIL: {image_path}"
-                        )
-                        pil_image = Image.open(image_path)
-                        self.original_image = np.array(pil_image)
-
-                if self.original_image is None:
-                    logger.error(f"Failed to load image: {image_path}")
-                    return False
-
-                # Convert BGR to RGB if needed (OpenCV loads as BGR)
-                if (
-                    len(self.original_image.shape) == RGB_CHANNELS
-                    and self.original_image.shape[2] == RGB_CHANNELS
-                ):
-                    self.original_image = cv2.cvtColor(
-                        self.original_image, cv2.COLOR_BGR2RGB
-                    )
-
-                # Create grayscale version of the original image
-                if len(self.original_image.shape) > MIN_IMAGE_DIMS:
-                    self.original_grayscale = cv2.cvtColor(
-                        self.original_image, cv2.COLOR_RGB2GRAY
-                    )
-                else:
-                    self.original_grayscale = self.original_image
-
-                # Create display version with default processing
-                self.apply_processing()
-
-                return True
+                return self._load_and_process_initial_image(image_path)
             except Exception as e:
                 logger.error(f"Error loading image: {e}")
                 return False
         except Exception as e:
             logger.error(f"Error loading image: {e}")
             return False
+
+    # Renamed from _extracted_from_load_image_8
+    def _load_and_process_initial_image(self, image_path):
+        # Load the image without any processing first
+        if image_path.lower().endswith((".tif", ".tiff")):
+            try:
+                with tifffile.TiffFile(image_path) as tif:
+                    if len(tif.pages) == 0:
+                        logger.error(f"TIFF file has no pages: {image_path}")
+                        return False
+                    self.original_image = tif.pages[0].asarray()
+            except Exception as e:
+                logger.error(f"Failed to load TIFF: {image_path} ({e})")
+                return False
+        else:
+            self.original_image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+            if self.original_image is None:
+                # If OpenCV fails, try PIL
+                logger.info(f"OpenCV failed to load image, trying PIL: {image_path}")
+                pil_image = Image.open(image_path)
+                self.original_image = np.array(pil_image)
+
+        if self.original_image is None:
+            logger.error(f"Failed to load image: {image_path}")
+            return False
+
+        # Convert BGR to RGB if needed (OpenCV loads as BGR)
+        if (
+            len(self.original_image.shape) == RGB_CHANNELS
+            and self.original_image.shape[2] == RGB_CHANNELS
+        ):
+            self.original_image = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2RGB)
+
+            # Create grayscale version of the original image
+        self.original_grayscale = (
+            cv2.cvtColor(self.original_image, cv2.COLOR_RGB2GRAY)
+            if len(self.original_image.shape) > MIN_IMAGE_DIMS
+            else self.original_image
+        )
+        # Create display version with default processing
+        self.apply_processing()
+
+        return True
 
     def apply_processing(self):
         """Apply current processing parameters to the original image"""
@@ -1942,18 +1941,9 @@ class ImageProcessor:
 
         # Use threshold-based edge detection if threshold is provided
         if threshold is not None:
-            logger.debug(f"Using threshold detection with value {threshold}")
-            self.boundaries, self.derivative, self.transition_types = (
-                find_line_pair_boundaries_threshold(self.profile, threshold)
+            results = self._extracted_from_process_and_analyze_58(
+                threshold, group, element
             )
-            edge_method = "threshold"
-            logger.debug(
-                f"Found {len(self.boundaries)} boundaries with threshold {threshold}"
-            )
-            # Analyze the profile after setting boundaries
-            results = self.analyze_profile(group, element)
-            results["profile_type"] = "max"
-            results["edge_method"] = edge_method
         else:
             # Use the specified edge method
             results = self.analyze_profile_with_edge_method(edge_method, group, element)
@@ -1965,6 +1955,18 @@ class ImageProcessor:
         results["roi_rotation"] = self.roi_rotation
 
         return results
+
+    # Renamed from _extracted_from_process_and_analyze_58
+    def _extracted_from_process_and_analyze_58(self, threshold, group, element):
+        logger.debug(f"Using threshold detection with value {threshold}")
+        self.boundaries, self.derivative, self.transition_types = (
+            find_line_pair_boundaries_threshold(self.profile, threshold)
+        )
+        edge_method = "threshold"
+        logger.debug(
+            f"Found {len(self.boundaries)} boundaries with threshold {threshold}"
+        )
+        return self._create_analysis_results_with_method(group, element, edge_method)
 
     def analyze_profile_with_edge_method(self, edge_method, group, element):
         """
@@ -1982,6 +1984,10 @@ class ImageProcessor:
             f"Found {len(self.boundaries) if self.boundaries else 0} boundaries with {edge_method} method"
         )
 
+        return self._create_analysis_results_with_method(group, element, edge_method)
+
+    # Renamed from _extracted_from_analyze_profile_with_edge_method_11
+    def _create_analysis_results_with_method(self, group, element, edge_method):
         result = self.analyze_profile(group, element)
         result["profile_type"] = "max"
         result["edge_method"] = edge_method
@@ -1992,77 +1998,131 @@ class ImageProcessor:
 
 
 def display_roi_info(idx: int, image=None) -> tuple[int, int, int, int] | None:
-    if idx is None:
-        # If idx is None, we're just checking the current ROI coordinates
-        # Use the first image's coordinates as a fallback
-        for i in range(len(st.session_state.get("uploaded_files_list", []))):
-            keys = get_image_session_keys(i)
-            coordinates_key = keys["coordinates"]
-            roi_valid_key = keys["roi_valid"]
-            if (
-                coordinates_key in st.session_state
-                and st.session_state[coordinates_key] is not None
-            ):
-                point1, point2 = st.session_state[coordinates_key]
-                roi_x = min(point1[0], point2[0])
-                roi_y = min(point1[1], point2[1])
-                roi_width = abs(point2[0] - point1[0])
-                roi_height = abs(point2[1] - point1[1])
-                if roi_width > 0 and roi_height > 0:
-                    return (int(roi_x), int(roi_y), int(roi_width), int(roi_height))
-        return None
+    """
+    Get ROI coordinates from session state and validate them.
 
+    Args:
+        idx: Index of the image in the uploaded_files_list or None to get any valid ROI
+        image: Optional image to validate ROI against
+
+    Returns:
+        Tuple of (x, y, width, height) or None if no valid ROI
+    """
+    # Case 1: idx is None - find any valid ROI from session state
+    if idx is None:
+        return _find_any_valid_roi()
+
+    # Case 2: Get ROI for specific image index
     keys = get_image_session_keys(idx)
     coordinates_key = keys["coordinates"]
     roi_valid_key = keys["roi_valid"]
+
+    # Check if coordinates exist
     if (
         coordinates_key not in st.session_state
         or st.session_state[coordinates_key] is None
     ):
         st.session_state[roi_valid_key] = False
         return None
+
     try:
-        point1, point2 = st.session_state[coordinates_key]
-        roi_x = min(point1[0], point2[0])
-        roi_y = min(point1[1], point2[1])
-        roi_width = abs(point2[0] - point1[0])
-        roi_height = abs(point2[1] - point1[1])
-        if roi_width <= 0 or roi_height <= 0:
-            logger.warning(
-                f"Invalid ROI dimensions: width={roi_width}, height={roi_height}"
-            )
-            st.session_state[roi_valid_key] = False
-            return None
-        if image is not None:
-            img_height, img_width = None, None
-            if hasattr(image, "shape"):
-                if len(image.shape) > 1:
-                    img_height, img_width = image.shape[0], image.shape[1]
-            elif hasattr(image, "size"):
-                img_width, img_height = image.size
-            if (
-                img_width is not None
-                and img_height is not None
-                and (
-                    roi_x < 0
-                    or roi_y < 0
-                    or roi_x + roi_width > img_width
-                    or roi_y + roi_height > img_height
-                )
-            ):
-                logger.warning(
-                    f"ROI extends beyond image dimensions: "
-                    f"roi=({roi_x},{roi_y},{roi_width},{roi_height}), "
-                    f"image=({img_width},{img_height})"
-                )
-                st.session_state[roi_valid_key] = False
-                return None
-        st.session_state[roi_valid_key] = True
-        return (int(roi_x), int(roi_y), int(roi_width), int(roi_height))
+        return _extracted_from_display_roi_info_31(
+            coordinates_key, roi_valid_key, image
+        )
     except Exception as e:
         logger.error(f"Error processing ROI: {e}")
         st.session_state[roi_valid_key] = False
         return None
+
+
+# TODO Rename this here and in `display_roi_info`
+def _extracted_from_display_roi_info_31(coordinates_key, roi_valid_key, image):
+    # Extract and validate ROI coordinates
+    point1, point2 = st.session_state[coordinates_key]
+    roi_coords = _extract_roi_coordinates(point1, point2)
+
+    if roi_coords is None:
+        st.session_state[roi_valid_key] = False
+        return None
+
+    roi_x, roi_y, roi_width, roi_height = roi_coords
+
+    # Validate against image dimensions if image is provided
+    if image is not None and not _validate_roi_against_image(roi_coords, image):
+        st.session_state[roi_valid_key] = False
+        return None
+
+    # ROI is valid
+    st.session_state[roi_valid_key] = True
+    return roi_coords
+
+
+def _find_any_valid_roi() -> tuple[int, int, int, int] | None:
+    """Find any valid ROI from session state."""
+    for i in range(len(st.session_state.get("uploaded_files_list", []))):
+        keys = get_image_session_keys(i)
+        coordinates_key = keys["coordinates"]
+
+        if (
+            coordinates_key in st.session_state
+            and st.session_state[coordinates_key] is not None
+        ):
+            point1, point2 = st.session_state[coordinates_key]
+            roi_coords = _extract_roi_coordinates(point1, point2)
+            if roi_coords is not None:
+                return roi_coords
+    return None
+
+
+def _extract_roi_coordinates(
+    point1: tuple, point2: tuple
+) -> tuple[int, int, int, int] | None:
+    """Extract and validate ROI coordinates from two points."""
+    roi_x = min(point1[0], point2[0])
+    roi_y = min(point1[1], point2[1])
+    roi_width = abs(point2[0] - point1[0])
+    roi_height = abs(point2[1] - point1[1])
+
+    if roi_width <= 0 or roi_height <= 0:
+        logger.warning(
+            f"Invalid ROI dimensions: width={roi_width}, height={roi_height}"
+        )
+        return None
+
+    return (int(roi_x), int(roi_y), int(roi_width), int(roi_height))
+
+
+def _validate_roi_against_image(roi_coords: tuple, image) -> bool:
+    """Validate ROI coordinates against image dimensions."""
+    roi_x, roi_y, roi_width, roi_height = roi_coords
+
+    # Get image dimensions
+    img_height, img_width = None, None
+    if hasattr(image, "shape"):
+        if len(image.shape) > 1:
+            img_height, img_width = image.shape[0], image.shape[1]
+    elif hasattr(image, "size"):
+        img_width, img_height = image.size
+
+    # Check if ROI is within image bounds
+    if (
+        img_width is not None
+        and img_height is not None
+        and (
+            roi_x < 0
+            or roi_y < 0
+            or roi_x + roi_width > img_width
+            or roi_y + roi_height > img_height
+        )
+    ):
+        logger.warning(
+            f"ROI extends beyond image dimensions: "
+            f"roi=({roi_x},{roi_y},{roi_width},{roi_height}), "
+            f"image=({img_width},{img_height})"
+        )
+        return False
+
+    return True
 
 
 def handle_image_selection(
@@ -2255,7 +2315,7 @@ def display_parsed_defaults(default_values):
 
     values_str = ", ".join(
         [
-            f"Mag: {default_values['magnification']}×"
+            f"Mag: {default_values['magnification']}x"
             if "magnification" in default_values
             else "",
             f"Group: {default_values['group']}" if "group" in default_values else "",
@@ -2351,7 +2411,7 @@ def create_analysis_settings_form(state_vars, keys, roi_tuple, image):
 
             # Magnification with number input and step buttons
             magnification = st.number_input(
-                "Magnification (×)",
+                "Magnification (x)",
                 min_value=0.1,
                 max_value=1000.0,
                 value=st.session_state[state_vars["magnification_key"]],
@@ -2529,7 +2589,7 @@ def display_analysis_results(keys, uploaded_file, image, state_vars):
         )
 
         # Get magnification and other parameters
-        unique_id = get_unique_id_for_image(uploaded_file)
+        get_unique_id_for_image(uploaded_file)
         magnification = st.session_state.get(state_vars["magnification_key"], 10.0)
 
         # Generate visualization
