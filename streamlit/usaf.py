@@ -17,12 +17,12 @@ import time
 from typing import Any  # Add type hint imports
 
 import cv2
-import matplotlib.patheffects as PathEffects
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit_nested_layout  # type: ignore  # noqa: F401
 import tifffile
+from matplotlib import patheffects
 from PIL import Image, ImageDraw
 from skimage import exposure, img_as_ubyte
 from streamlit_image_coordinates import streamlit_image_coordinates
@@ -1121,7 +1121,7 @@ class ProfileVisualizer:
 
         # Shadow effect for text
         self.shadow_effect = [
-            PathEffects.withSimplePatchShadow(
+            patheffects.withSimplePatchShadow(
                 offset=(1.0, -1.0), shadow_rgbFace="black", alpha=0.6
             )
         ]
@@ -1139,6 +1139,55 @@ class ProfileVisualizer:
                 "ytick.labelsize": 9,
             }
         )
+
+    def _format_group_element_title(self, group: int, element: int) -> str:
+        """Format the group and element title with LaTeX math formatting."""
+        group_str = f"$\\mathbf{{{group}}}$"
+        element_str = f"$\\mathbf{{{element}}}$"
+        return f"USAF Target: Group {group_str}, Element {element_str}"
+
+    def _format_line_pairs_info(
+        self, lp_per_mm: float | None, avg_line_pair_width: float | None
+    ) -> str:
+        """Format line pairs per mm and average line pair width information."""
+        if not lp_per_mm and not avg_line_pair_width:
+            return ""
+
+        lp_per_mm_str = (
+            f"Line Pairs/mm: $\\mathbf{{{lp_per_mm:.2f}}}$" if lp_per_mm else ""
+        )
+        avg_width_str = (
+            f"Avg. LP Width: $\\mathbf{{{avg_line_pair_width:.2f}}}$ px"
+            if avg_line_pair_width and avg_line_pair_width > 0
+            else ""
+        )
+
+        if lp_per_mm_str and avg_width_str:
+            return f"{lp_per_mm_str}  |  {avg_width_str}"
+        return lp_per_mm_str or avg_width_str
+
+    def _format_pixel_size_info(
+        self,
+        avg_line_pair_width: float | None,
+        lp_width_um: float | None,
+        magnification: float | None,
+    ) -> str:
+        """Format pixel size and magnification information."""
+        if not (avg_line_pair_width and avg_line_pair_width > 0 and lp_width_um):
+            return ""
+
+        pixel_size = lp_width_um / avg_line_pair_width
+        pixel_size_str = f"Pixel Size: $\\mathbf{{{pixel_size:.3f}}}$ µm/pixel"
+
+        mag_str = (
+            f"Magnification: $\\mathbf{{{magnification:.1f}\\times}}$"
+            if magnification
+            else ""
+        )
+
+        if pixel_size_str and mag_str:
+            return f"{pixel_size_str}  |  {mag_str}"
+        return pixel_size_str or mag_str
 
     def create_figure(self, figsize=(8, 8), dpi=150):
         """Create a square matplotlib figure with properly configured layout"""
@@ -1186,65 +1235,39 @@ class ProfileVisualizer:
         magnification=None,
         lp_per_mm=None,
     ):
-        """Plot the ROI image"""
+        """Plot the ROI image with title and annotations."""
+        # Display the image
         ax.imshow(image, cmap="gray", aspect="auto", interpolation="bicubic")
 
-        if group is not None and element is not None:
-            title_lines = []
-            group_str = f"$\\mathbf{{{group}}}$"
-            element_str = f"$\\mathbf{{{element}}}$"
-            title_lines.append(f"USAF Target: Group {group_str}, Element {element_str}")
+        # Return early if no group/element info to display
+        if group is None or element is None:
+            return
 
-            # Combine Line Pairs per mm and Avg Line Pair Width on one line
-            lp_per_mm_str = ""
-            avg_width_str = ""
+        # Build title lines
+        title_lines = []
 
-            if lp_per_mm is not None:
-                lp_per_mm_str = f"Line Pairs/mm: $\\mathbf{{{lp_per_mm:.2f}}}$"
+        # Add group and element info
+        title_lines.append(self._format_group_element_title(group, element))
 
-            if avg_line_pair_width is not None and avg_line_pair_width > 0:
-                avg_width_str = (
-                    f"Avg. LP Width: $\\mathbf{{{avg_line_pair_width:.2f}}}$ px"
-                )
+        # Add line pairs info
+        if line_pairs_info := self._format_line_pairs_info(
+            lp_per_mm, avg_line_pair_width
+        ):
+            title_lines.append(line_pairs_info)
 
-            # Add combined line if either value is available
-            if lp_per_mm_str or avg_width_str:
-                combined_str = ""
-                if lp_per_mm_str and avg_width_str:
-                    combined_str = f"{lp_per_mm_str}  |  {avg_width_str}"
-                else:
-                    combined_str = lp_per_mm_str or avg_width_str
-                title_lines.append(combined_str)
+        # Add pixel size and magnification info
+        if pixel_size_info := self._format_pixel_size_info(
+            avg_line_pair_width, lp_width_um, magnification
+        ):
+            title_lines.append(pixel_size_info)
 
-            # Combine Pixel Size and Magnification on one line
-            if (
-                avg_line_pair_width is not None
-                and avg_line_pair_width > 0
-                and lp_width_um is not None
-            ):
-                pixel_size = lp_width_um / avg_line_pair_width
-                pixel_size_str = f"Pixel Size: $\\mathbf{{{pixel_size:.3f}}}$ µm/pixel"
-
-                mag_str = ""
-                if magnification is not None:
-                    mag_str = f"Magnification: $\\mathbf{{{magnification:.1f}\\times}}$"
-
-                # Add combined line if both values are available
-                if pixel_size_str and mag_str:
-                    title_lines.append(f"{pixel_size_str}  |  {mag_str}")
-                else:
-                    if pixel_size_str:
-                        title_lines.append(pixel_size_str)
-                    if mag_str:
-                        title_lines.append(mag_str)
-
-            title_text = "\n".join(title_lines)
-            ax.set_title(
-                title_text,
-                fontweight="normal",
-                pad=15,
-                fontsize=20,
-            )
+        # Set the title
+        ax.set_title(
+            "\n".join(title_lines),
+            fontweight="normal",
+            pad=15,
+            fontsize=20,
+        )
 
     def plot_profiles(
         self,
