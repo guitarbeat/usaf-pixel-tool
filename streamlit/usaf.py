@@ -1992,6 +1992,26 @@ class ImageProcessor:
 
 
 def display_roi_info(idx: int, image=None) -> tuple[int, int, int, int] | None:
+    if idx is None:
+        # If idx is None, we're just checking the current ROI coordinates
+        # Use the first image's coordinates as a fallback
+        for i in range(len(st.session_state.get("uploaded_files_list", []))):
+            keys = get_image_session_keys(i)
+            coordinates_key = keys["coordinates"]
+            roi_valid_key = keys["roi_valid"]
+            if (
+                coordinates_key in st.session_state
+                and st.session_state[coordinates_key] is not None
+            ):
+                point1, point2 = st.session_state[coordinates_key]
+                roi_x = min(point1[0], point2[0])
+                roi_y = min(point1[1], point2[1])
+                roi_width = abs(point2[0] - point1[0])
+                roi_height = abs(point2[1] - point1[1])
+                if roi_width > 0 and roi_height > 0:
+                    return (int(roi_x), int(roi_y), int(roi_width), int(roi_height))
+        return None
+
     keys = get_image_session_keys(idx)
     coordinates_key = keys["coordinates"]
     roi_valid_key = keys["roi_valid"]
@@ -2974,11 +2994,11 @@ def analyze_and_display_image(idx, uploaded_file):
         bit_depth = st.session_state.get(state_vars["bit_depth_key"], 8)
         st.info(f"Image bit depth: {bit_depth}-bit (Range: 0-{(1 << bit_depth)-1})")
 
-        # Get ROI info for threshold calculation
-        roi_tuple = display_roi_info(idx, image)
+        # Get ROI info once and reuse it throughout the function
+        current_roi_tuple = display_roi_info(idx, image)
 
         # Create settings form
-        create_analysis_settings_form(state_vars, keys, roi_tuple, image)
+        create_analysis_settings_form(state_vars, keys, current_roi_tuple, image)
 
         # Display ROI selection and results in two columns
         roi_col, plot_col = st.columns([1, 1])
@@ -2989,8 +3009,7 @@ def analyze_and_display_image(idx, uploaded_file):
         with plot_col:
             display_analysis_results(keys, uploaded_file, image, state_vars)
 
-        # Run analysis if needed
-        current_roi_tuple = display_roi_info(idx, image)
+        # Run analysis if needed - use the previously retrieved ROI tuple
         run_image_analysis(keys, state_vars, image, temp_path, current_roi_tuple)
 
         # Display analysis details if results are available
