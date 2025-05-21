@@ -2355,185 +2355,157 @@ def get_default_threshold(roi_tuple, image):
 
 
 def create_analysis_settings_form(state_vars, keys, roi_tuple, image):
-    """Create form for analysis settings."""
+    """Create analysis settings UI with instant apply via on_change callbacks."""
     unique_id = state_vars["autoscale_key"].split("_")[1]
 
     # Use the provided ROI tuple for threshold calculation
     default_threshold, max_threshold = get_default_threshold(roi_tuple, image)
 
-    with st.form(key=f"analysis_settings_form_{unique_id}"):
-        st.subheader("Analysis Settings")
-        st.markdown("#### Target Parameters")
+    def on_setting_change(key, value=None):
+        # If value is provided, update session state for that key
+        if value is not None:
+            st.session_state[key] = value
+        # Set the settings_changed flag
+        st.session_state[state_vars["settings_changed_key"]] = True
 
-        # Create tabs for better organization
-        tabs = st.tabs(["Target Properties", "Image Processing", "Analysis Options"])
+    st.subheader("Analysis Settings")
+    st.markdown("#### Target Parameters")
 
-        with tabs[0]:
-            # Group selector with horizontal radio buttons
-            st.subheader("Group")
-            selected_group = st.radio(
-                "Group",
-                options=["-2", "-1", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
-                index=(
-                    [
-                        "-2",
-                        "-1",
-                        "0",
-                        "1",
-                        "2",
-                        "3",
-                        "4",
-                        "5",
-                        "6",
-                        "7",
-                        "8",
-                        "9",
-                    ].index(str(state_vars["default_group"]))
-                    if str(state_vars["default_group"])
-                    in {"-2", "-1", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
-                    else 2
-                ),
-                key=f"group_radio_{unique_id}_form",
-                horizontal=True,
-            )
+    # Create tabs for better organization
+    tabs = st.tabs(["Target Properties", "Image Processing", "Analysis Options"])
 
-            # Element selector with radio buttons
-            st.subheader("Element")
-            selected_element = st.radio(
-                "Element",
-                options=["1", "2", "3", "4", "5", "6"],
-                index=int(state_vars["default_element"]) - 1
-                if 0 < int(state_vars["default_element"]) <= MAX_USAF_ELEMENT
-                else 0,
-                key=f"element_radio_{unique_id}_form",
-                horizontal=True,
-            )
-
-            # Magnification with number input and step buttons
-            magnification = st.number_input(
-                "Magnification (x)",
-                min_value=0.1,
-                max_value=1000.0,
-                value=st.session_state[state_vars["magnification_key"]],
-                step=0.1,
-                format="%.1f",
-                key=f"{state_vars['magnification_key']}_form",
-                help="Set the optical magnification for display in the plot title",
-            )
-
-        with tabs[1]:
-            # Use columns to organize contrast controls
-            col1, col2 = st.columns(2)
-
-            with col1:
-                # Toggle for autoscale
-                autoscale = st.toggle(
-                    "Autoscale",
-                    value=st.session_state[state_vars["autoscale_key"]],
-                    key=f"{state_vars['autoscale_key']}_form",
-                    help="Uses percentile-based contrast stretching based on saturated pixels value.",
-                )
-
-                # Toggle for normalize
-                normalize = st.toggle(
-                    "Normalize",
-                    value=st.session_state[state_vars["normalize_key"]],
-                    key=f"{state_vars['normalize_key']}_form",
-                    help="Recalculate pixel values to use the full range (0-255 for 8-bit)",
-                )
-
-            with col2:
-                # Toggle for invert
-                invert = st.toggle(
-                    "Invert",
-                    value=st.session_state[state_vars["invert_key"]],
-                    key=f"{state_vars['invert_key']}_form",
-                    help="Invert the image (useful for microscopy where dark = high signal)",
-                )
-
-                # Toggle for equalize histogram
-                equalize_histogram = st.toggle(
-                    "Equalize Histogram",
-                    value=st.session_state[state_vars["equalize_histogram_key"]],
-                    key=f"{state_vars['equalize_histogram_key']}_form",
-                    help="Enhance image using histogram equalization",
-                )
-
-            # Add saturated pixels slider (only enabled if autoscale is on)
-            saturated_pixels = st.slider(
-                "Saturated Pixels (%)",
-                min_value=0.0,
-                max_value=20.0,
-                value=st.session_state[state_vars["saturated_pixels_key"]],
-                step=0.1,
-                format="%.1f",
-                key=f"{state_vars['saturated_pixels_key']}_form",
-                help="Percentage of pixels allowed to become saturated",
-                disabled=not autoscale,
-            )
-
-            st.info(
-                "Note: When 'Equalize Histogram' is enabled, 'Saturated Pixels' and 'Normalize' settings are ignored."
-            )
-
-        with tabs[2]:
-            st.markdown(
-                "**Using Max Intensity Profile** - for detecting edges in noisy images"
-            )
-            # Threshold slider
-            threshold = st.slider(
-                "Threshold Line",
-                min_value=0,
-                max_value=max_threshold,
-                value=int(
-                    st.session_state.get(state_vars["threshold_key"], default_threshold)
-                ),
-                key=f"{state_vars['threshold_key']}_form",
-                help="Adjust the threshold line to find edges where the intensity crosses this value",
-            )
-
-            # ROI rotation controls
-            prev_rotation = st.session_state.get(state_vars["roi_rotation_key"], 0)
-            rotation_options = ["0°", "90°", "180°", "270°"]
-
-            selected_rotation = st.radio(
-                "ROI Rotation",
-                options=rotation_options,
-                index=prev_rotation,
-                horizontal=True,
-                key=f"roi_rotation_radio_{unique_id}_form",
-                help="Rotate the extracted ROI in 90° increments after selection",
-            )
-            new_rotation = rotation_options.index(selected_rotation)
-
-        # Submit button
-        submit_clicked = st.form_submit_button(
-            "Apply Settings & Analyze",
-            type="primary",
-            use_container_width=True,
+    with tabs[0]:
+        st.subheader("Group")
+        group_key = f"group_radio_{unique_id}_form"
+        group_options = ["-2", "-1", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+        group_index = (
+            group_options.index(str(state_vars["default_group"]))
+            if str(state_vars["default_group"]) in set(group_options)
+            else 2
+        )
+        st.radio(
+            "Group",
+            options=group_options,
+            index=group_index,
+            key=group_key,
+            horizontal=True,
+            on_change=on_setting_change,
+            args=(keys["group"],),
         )
 
-        if submit_clicked:
-            # Update target parameters
-            st.session_state[keys["group"]] = int(selected_group)
-            st.session_state[keys["element"]] = int(selected_element)
-            st.session_state[state_vars["magnification_key"]] = magnification
+        st.subheader("Element")
+        element_key = f"element_radio_{unique_id}_form"
+        element_options = ["1", "2", "3", "4", "5", "6"]
+        element_index = (
+            int(state_vars["default_element"]) - 1
+            if 0 < int(state_vars["default_element"]) <= MAX_USAF_ELEMENT
+            else 0
+        )
+        st.radio(
+            "Element",
+            options=element_options,
+            index=element_index,
+            key=element_key,
+            horizontal=True,
+            on_change=on_setting_change,
+            args=(keys["element"],),
+        )
 
-            # Update image processing settings
-            st.session_state[state_vars["autoscale_key"]] = autoscale
-            st.session_state[state_vars["invert_key"]] = invert
-            st.session_state[state_vars["normalize_key"]] = normalize
-            st.session_state[state_vars["saturated_pixels_key"]] = saturated_pixels
-            st.session_state[state_vars["equalize_histogram_key"]] = equalize_histogram
+        mag_key = f"{state_vars['magnification_key']}_form"
+        st.number_input(
+            "Magnification (x)",
+            min_value=0.1,
+            max_value=1000.0,
+            value=st.session_state[state_vars["magnification_key"]],
+            step=0.1,
+            format="%.1f",
+            key=mag_key,
+            help="Set the optical magnification for display in the plot title",
+            on_change=on_setting_change,
+            args=(state_vars["magnification_key"],),
+        )
 
-            # Update analysis settings
-            st.session_state[state_vars["threshold_key"]] = threshold
-            st.session_state[state_vars["roi_rotation_key"]] = new_rotation
+    with tabs[1]:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.toggle(
+                "Autoscale",
+                value=st.session_state[state_vars["autoscale_key"]],
+                key=f"{state_vars['autoscale_key']}_form",
+                help="Uses percentile-based contrast stretching based on saturated pixels value.",
+                on_change=on_setting_change,
+                args=(state_vars["autoscale_key"],),
+            )
+            st.toggle(
+                "Normalize",
+                value=st.session_state[state_vars["normalize_key"]],
+                key=f"{state_vars['normalize_key']}_form",
+                help="Recalculate pixel values to use the full range (0-255 for 8-bit)",
+                on_change=on_setting_change,
+                args=(state_vars["normalize_key"],),
+            )
+        with col2:
+            st.toggle(
+                "Invert",
+                value=st.session_state[state_vars["invert_key"]],
+                key=f"{state_vars['invert_key']}_form",
+                help="Invert the image (useful for microscopy where dark = high signal)",
+                on_change=on_setting_change,
+                args=(state_vars["invert_key"],),
+            )
+            st.toggle(
+                "Equalize Histogram",
+                value=st.session_state[state_vars["equalize_histogram_key"]],
+                key=f"{state_vars['equalize_histogram_key']}_form",
+                help="Enhance image using histogram equalization",
+                on_change=on_setting_change,
+                args=(state_vars["equalize_histogram_key"],),
+            )
+        st.slider(
+            "Saturated Pixels (%)",
+            min_value=0.0,
+            max_value=20.0,
+            value=st.session_state[state_vars["saturated_pixels_key"]],
+            step=0.1,
+            format="%.1f",
+            key=f"{state_vars['saturated_pixels_key']}_form",
+            help="Percentage of pixels allowed to become saturated",
+            disabled=not st.session_state[state_vars["autoscale_key"]],
+            on_change=on_setting_change,
+            args=(state_vars["saturated_pixels_key"],),
+        )
+        st.info(
+            "Note: When 'Equalize Histogram' is enabled, 'Saturated Pixels' and 'Normalize' settings are ignored."
+        )
 
-            # Set flag to trigger analysis
-            st.session_state[state_vars["settings_changed_key"]] = True
-
-    return submit_clicked
+    with tabs[2]:
+        st.markdown(
+            "**Using Max Intensity Profile** - for detecting edges in noisy images"
+        )
+        st.slider(
+            "Threshold Line",
+            min_value=0,
+            max_value=max_threshold,
+            value=int(
+                st.session_state.get(state_vars["threshold_key"], default_threshold)
+            ),
+            key=f"{state_vars['threshold_key']}_form",
+            help="Adjust the threshold line to find edges where the intensity crosses this value",
+            on_change=on_setting_change,
+            args=(state_vars["threshold_key"],),
+        )
+        prev_rotation = st.session_state.get(state_vars["roi_rotation_key"], 0)
+        rotation_options = ["0°", "90°", "180°", "270°"]
+        st.radio(
+            "ROI Rotation",
+            options=rotation_options,
+            index=prev_rotation,
+            horizontal=True,
+            key=f"roi_rotation_radio_{unique_id}_form",
+            help="Rotate the extracted ROI in 90° increments after selection",
+            on_change=on_setting_change,
+            args=(state_vars["roi_rotation_key"],),
+        )
 
 
 def display_roi_selection(idx, uploaded_file, image, keys):
