@@ -2658,7 +2658,15 @@ def run_image_analysis(keys, state_vars, image, temp_path, current_roi_tuple):
     # Get current ROI rotation
     roi_rotation = st.session_state.get(state_vars["roi_rotation_key"], 0)
 
-    # Using the ROI tuple that was passed in from analyze_and_display_image
+    # Add a flag to prevent infinite recursion
+    rerun_key = f"needs_rerun_{unique_id}"
+
+    # If we've already processed this analysis request, don't process it again
+    if st.session_state.get(rerun_key, False):
+        # Reset the flag for next time
+        st.session_state[rerun_key] = False
+        return
+
     if (
         st.session_state.get(state_vars["settings_changed_key"], False)
         and current_roi_tuple is not None
@@ -2707,6 +2715,9 @@ def run_image_analysis(keys, state_vars, image, temp_path, current_roi_tuple):
 
                 # Clear settings changed flag after processing
                 st.session_state[state_vars["settings_changed_key"]] = False
+
+                # Set the rerun flag before triggering rerun
+                st.session_state[rerun_key] = True
 
                 # Rerun once to display results
                 st.rerun()
