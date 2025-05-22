@@ -23,11 +23,19 @@ import sentry_sdk
 import streamlit_nested_layout  # type: ignore  # noqa: F401
 import tifffile
 from matplotlib import patheffects
-from PIL import Image, ImageDraw
+from PIL import Image
 from skimage import exposure, img_as_ubyte
-from streamlit_image_coordinates import streamlit_image_coordinates
+from streamlit_drawable_canvas import st_canvas
 
 import streamlit as st
+
+# Configure matplotlib for Streamlit
+plt.switch_backend("Agg")  # Use non-interactive backend
+plt.style.use("default")  # Use default style instead of seaborn
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 sentry_sdk.init(
     dsn="https://90e0b71a002f0517b8bcae83d023e8ff@o4509363227197440.ingest.us.sentry.io/4509363256033280",
@@ -91,6 +99,7 @@ logging.basicConfig(
 MIN_IMAGE_DIMS = 2
 MAX_IMAGE_CHANNELS = 4
 RGB_CHANNELS = 3
+ROI_MIN_WIDTH = 5  # For line pair width threshold
 
 # Array dimensions and indices
 MIN_ARRAY_DIMS = 2
@@ -100,7 +109,7 @@ MIN_PAIRS = 2
 MIN_LINE_PAIRS = 2
 MIN_BOUNDARIES = 3
 ROI_COORDS_LENGTH = 4
-MIN_PROPER_TRANSITIONS = 2  # Minimum number of transitions needed for pattern detection
+MIN_PROPER_TRANSITIONS = 3  # Minimum number of transitions needed for pattern detection
 
 # USAF Target constants
 MAX_USAF_ELEMENT = 6
@@ -468,7 +477,8 @@ def _load_standard_image(file_path: str) -> tuple[np.ndarray | None, str | None]
                 f"Loaded image: shape={image.shape}, dtype={image.dtype}, range={np.min(image)}-{np.max(image)}"
             )
             # Convert BGR to RGB if needed (OpenCV loads as BGR)
-            if len(image.shape) == RGB_CHANNELS and image.shape[2] == RGB_CHANNELS:
+            # Only convert if image is 3D and has 3 channels (i.e., is a color image)
+            if image.ndim == RGB_CHANNELS and image.shape[2] == RGB_CHANNELS:
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             return image, file_path
         else:
@@ -723,7 +733,7 @@ def find_best_two_line_pairs(dark_bar_starts):
                 best_indices = (i, j)
     # Get the best two pairs and their average width
     best_pairs = [pairs[best_indices[0]], pairs[best_indices[1]]]
-    avg_width = (widths[best_indices[0]] + widths[best_indices[1]]) / MIN_ARRAY_SIZE
+    avg_width = (widths[best_indices[0]] + widths[best_indices[1]]) / 2
     return best_pairs, avg_width
 
 
@@ -846,21 +856,39 @@ def find_line_pair_boundaries_derivative(profile):
         (dark_bar_starts, derivative, transition_types)
     Only -1 (light-to-dark) transitions are returned as boundaries.
     """
-    all_transitions, all_types, derivative = detect_significant_transitions(profile)
+    # Calculate derivative
+    derivative = np.gradient(profile)
+
+    # Find zero crossings in derivative
+    zero_crossings = np.where(np.diff(np.signbit(derivative)))[0]
+    transition_types = [-1 if derivative[i] < 0 else 1 for i in zero_crossings]
+
+    # Filter transitions based on derivative magnitude
+    max_deriv = np.max(np.abs(derivative))
+    min_strength = 0.1 * max_deriv  # Reduced from 0.2 to be more sensitive
+    strong_transitions = [
+        (i, t)
+        for i, t in zip(zero_crossings, transition_types, strict=False)
+        if abs(derivative[i]) > min_strength
+    ]
+
+    if not strong_transitions:
+        return [], derivative, []
+
+    # Extract alternating patterns
+    transitions, types = zip(*strong_transitions, strict=False)
     pattern_transitions, pattern_types = extract_alternating_patterns(
-        all_transitions, all_types
+        list(transitions), list(types)
     )
-    # Adaptive threshold: 20% of max derivative
-    max_deriv = np.max(np.abs(derivative)) if len(derivative) > 0 else 0
-    min_strength = 0.2 * max_deriv if max_deriv > 0 else 0
-    final_transitions, final_types = limit_transitions_to_strongest(
-        pattern_transitions, pattern_types, derivative, min_strength=min_strength
-    )
+
     # Only keep -1 transitions (light-to-dark, i.e., dark bar starts)
     dark_bar_starts = [
-        t for t, typ in zip(final_transitions, final_types, strict=False) if typ == -1
+        t
+        for t, typ in zip(pattern_transitions, pattern_types, strict=False)
+        if typ == -1
     ]
     dark_bar_types = [-1] * len(dark_bar_starts)
+
     return dark_bar_starts, derivative, dark_bar_types
 
 
@@ -875,74 +903,74 @@ def find_line_pair_boundaries_windowed(profile, window=5):
     pseudo_derivative = np.zeros_like(profile, dtype=float)
     edges = []
     transition_types = []
+
+    # Calculate windowed differences
     for i in range(window, len(profile) - window):
         left = np.mean(profile[i - window : i])
         right = np.mean(profile[i : i + window])
         diff = right - left
         pseudo_derivative[i] = diff
+
+        # Detect zero crossings
         if i > window and np.sign(pseudo_derivative[i - 1]) != np.sign(diff):
             edges.append(i)
             transition_types.append(1 if diff > 0 else -1)
+
+    if not edges:
+        return [], pseudo_derivative, []
+
+    # Filter transitions based on magnitude
+    max_deriv = np.max(np.abs(pseudo_derivative))
+    min_strength = 0.1 * max_deriv  # Reduced from 0.2 to be more sensitive
+    strong_transitions = [
+        (i, t)
+        for i, t in zip(edges, transition_types, strict=False)
+        if abs(pseudo_derivative[i]) > min_strength
+    ]
+
+    if not strong_transitions:
+        return [], pseudo_derivative, []
+
+    # Extract alternating patterns
+    transitions, types = zip(*strong_transitions, strict=False)
     pattern_transitions, pattern_types = extract_alternating_patterns(
-        edges, transition_types
+        list(transitions), list(types)
     )
-    # Adaptive threshold: 20% of max pseudo_derivative
-    max_deriv = np.max(np.abs(pseudo_derivative)) if len(pseudo_derivative) > 0 else 0
-    min_strength = 0.2 * max_deriv if max_deriv > 0 else 0
-    final_transitions, final_types = limit_transitions_to_strongest(
-        pattern_transitions, pattern_types, pseudo_derivative, min_strength=min_strength
-    )
+
     # Only keep -1 transitions (light-to-dark, i.e., dark bar starts)
     dark_bar_starts = [
-        t for t, typ in zip(final_transitions, final_types, strict=False) if typ == -1
+        t
+        for t, typ in zip(pattern_transitions, pattern_types, strict=False)
+        if typ == -1
     ]
     dark_bar_types = [-1] * len(dark_bar_starts)
+
     return dark_bar_starts, pseudo_derivative, dark_bar_types
 
 
 def find_line_pair_boundaries_threshold(profile, threshold):
     """
     Find line pair boundaries by locating where the profile crosses a threshold value.
-
-    Args:
-        profile: The intensity profile array
-        threshold: The threshold value to use
-
     Returns:
         (dark_bar_starts, thresholded_profile, transition_types)
     Only -1 (light-to-dark) transitions are returned as boundaries.
     """
-    # Convert profile to numpy array
-    profile_array = np.array(profile)
+    profile = np.asarray(profile)
 
-    # Ensure threshold is within valid range for uint8 data (0-255)
-    threshold = max(0, min(255, threshold))
+    # Create binary mask
+    above_threshold = profile > threshold
 
-    # Create a binary mask where True is above threshold
-    above_threshold = profile_array > threshold
+    # Find transitions from above to below threshold
+    dark_bar_starts = []
+    for i in range(1, len(above_threshold)):
+        if above_threshold[i - 1] and not above_threshold[i]:
+            dark_bar_starts.append(i)
 
-    dark_bar_starts = [
-        i
-        for i in range(1, len(above_threshold))
-        if above_threshold[i - 1] is True and above_threshold[i] is False
-    ]
-    # Create corresponding transition types (all -1 for light-to-dark)
+    # Create thresholded profile for visualization
+    thresholded_profile = np.ones_like(profile) * threshold
+
+    # All transitions are light-to-dark (-1)
     transition_types = [-1] * len(dark_bar_starts)
-
-    # Debug output about what was found
-    logger.debug(
-        f"Profile range: {np.min(profile_array)} to {np.max(profile_array)}, threshold: {threshold}"
-    )
-    logger.debug(
-        f"Found {len(dark_bar_starts)} dark bar starts (light-to-dark transitions)"
-    )
-    if dark_bar_starts:
-        logger.debug(f"Dark bar starts at positions: {dark_bar_starts[:10]}...")
-    else:
-        logger.warning(f"No dark bar starts found with threshold {threshold}!")
-
-    # Create a pseudo derivative for compatibility with the rest of the code
-    thresholded_profile = np.ones_like(profile_array) * threshold
 
     return dark_bar_starts, thresholded_profile, transition_types
 
@@ -1154,7 +1182,7 @@ class ProfileVisualizer:
     def create_figure(self, figsize=(8, 8), dpi=150):
         """Create a square matplotlib figure with properly configured layout"""
         fig = plt.figure(figsize=figsize, dpi=dpi, facecolor="white")
-        gs = fig.add_gridspec(MIN_ARRAY_DIMS, 1, height_ratios=[1, 1], hspace=0.05)
+        gs = fig.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.05)
 
         # Set explicit figure margins to avoid tight_layout issues
         fig.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.05)
@@ -1301,7 +1329,7 @@ class ProfileVisualizer:
         line_pairs = []
         for j, (start_pos, end_pos) in enumerate(best_pairs):
             width_px = end_pos - start_pos
-            if width_px >= MIN_PAIRS:
+            if width_px >= ROI_MIN_WIDTH:
                 line_pairs.append((start_pos, end_pos, width_px, j))
         return line_pairs
 
@@ -1597,18 +1625,27 @@ class ImageProcessor:
             return False
 
         # Convert BGR to RGB if needed (OpenCV loads as BGR)
+        # Only convert if image is 3D and has 3 channels (i.e., is a color image)
         if (
-            len(self.original_image.shape) == RGB_CHANNELS
+            self.original_image.ndim == RGB_CHANNELS
             and self.original_image.shape[2] == RGB_CHANNELS
         ):
             self.original_image = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2RGB)
 
-            # Create grayscale version of the original image
-        self.original_grayscale = (
-            cv2.cvtColor(self.original_image, cv2.COLOR_RGB2GRAY)
-            if len(self.original_image.shape) > MIN_IMAGE_DIMS
-            else self.original_image
-        )
+        # Create grayscale version of the original image (handle 1, 3, 4 channels)
+        if self.original_image is not None and self.original_image.ndim == 3:
+            if self.original_image.shape[2] == 3:
+                self.original_grayscale = cv2.cvtColor(
+                    self.original_image, cv2.COLOR_RGB2GRAY
+                )
+            elif self.original_image.shape[2] == 4:
+                rgb_img = cv2.cvtColor(self.original_image, cv2.COLOR_RGBA2RGB)
+                self.original_grayscale = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2GRAY)
+            else:
+                # Unexpected channel count, fallback to first channel
+                self.original_grayscale = self.original_image[..., 0]
+        else:
+            self.original_grayscale = self.original_image
         # Create display version with default processing
         self.apply_processing()
 
@@ -1627,9 +1664,16 @@ class ImageProcessor:
                 equalize_histogram=self.processing_params["equalize_histogram"],
             )
 
-            # Create grayscale version of the processed image
-            if len(self.image.shape) > MIN_IMAGE_DIMS:
-                self.grayscale = cv2.cvtColor(self.image, cv2.COLOR_RGB2GRAY)
+            # Create grayscale version of the processed image (handle 1, 3, 4 channels)
+            if self.image is not None and self.image.ndim == 3:
+                if self.image.shape[2] == 3:
+                    self.grayscale = cv2.cvtColor(self.image, cv2.COLOR_RGB2GRAY)
+                elif self.image.shape[2] == 4:
+                    rgb_img = cv2.cvtColor(self.image, cv2.COLOR_RGBA2RGB)
+                    self.grayscale = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2GRAY)
+                else:
+                    # Unexpected channel count, fallback to first channel
+                    self.grayscale = self.image[..., 0]
             else:
                 self.grayscale = self.image
 
@@ -1735,18 +1779,43 @@ class ImageProcessor:
             logger.error(f"Error getting line profile: {e}")
             return None
 
-    def detect_edges(self, edge_method="original"):
+    def detect_edges(self, edge_method="original", threshold=None):
+        """
+        Detect edges in the profile using the specified method.
+
+        Args:
+            edge_method: One of 'original', 'parallel', or 'threshold'
+            threshold: Optional threshold value for threshold-based detection
+
+        Returns:
+            bool: True if edges were detected, False otherwise
+        """
         if self.profile is None:
-            logger.error("No profile available for edge detection")
             return False
+
+        # Normalize profile to 0-255 range for consistent threshold handling
+        profile_min = np.min(self.profile)
+        profile_max = np.max(self.profile)
+        normalized_profile = (
+            (self.profile - profile_min) / (profile_max - profile_min) * 255
+        ).astype(np.uint8)
+
         if edge_method == "parallel":
             self.boundaries, self.derivative, self.transition_types = (
-                find_line_pair_boundaries_windowed(self.profile)
+                find_line_pair_boundaries_windowed(normalized_profile)
             )
-        else:
+        elif edge_method == "threshold":
+            # If no threshold provided, use adaptive threshold
+            if threshold is None:
+                threshold = np.mean(normalized_profile)
             self.boundaries, self.derivative, self.transition_types = (
-                find_line_pair_boundaries_derivative(self.profile)
+                find_line_pair_boundaries_threshold(normalized_profile, threshold)
             )
+        else:  # original method
+            self.boundaries, self.derivative, self.transition_types = (
+                find_line_pair_boundaries_derivative(normalized_profile)
+            )
+
         return len(self.boundaries) > 0
 
     def calculate_contrast(self):
@@ -1904,8 +1973,8 @@ class ImageProcessor:
             group: USAF group number
             element: USAF group element
             use_max: If True, use max for profile; else mean (defaults to True)
-            edge_method: 'original' or 'parallel', for legend
-            threshold: Threshold value for edge detection (if None, use edge_method)
+            edge_method: 'original', 'parallel', or 'threshold'
+            threshold: Threshold value for edge detection (if None, use adaptive threshold)
             roi_rotation: Number of 90-degree rotations to apply to the ROI (0-3)
             **processing_params: Additional processing parameters (autoscale, invert, etc.)
         Returns:
@@ -1926,72 +1995,19 @@ class ImageProcessor:
         # Get the profile (using max intensity)
         self.get_line_profile(use_max=True)
 
-        # Debug the profile range
-        min_val = (
-            np.min(self.profile)
-            if self.profile is not None and len(self.profile) > 0
-            else 0
-        )
-        max_val = (
-            np.max(self.profile)
-            if self.profile is not None and len(self.profile) > 0
-            else 0
-        )
-        logger.debug(f"Profile range: {min_val} to {max_val}")
+        # Detect edges using the specified method
+        if not self.detect_edges(edge_method, threshold):
+            return {"error": "Failed to detect edges in profile"}
 
-        # Use threshold-based edge detection if threshold is provided
-        if threshold is not None:
-            results = self._extracted_from_process_and_analyze_58(
-                threshold, group, element
-            )
-        else:
-            # Use the specified edge method
-            results = self.analyze_profile_with_edge_method(edge_method, group, element)
+        # Analyze the profile
+        results = self.analyze_profile(group, element)
 
-        # Add threshold information to results
-        results["threshold"] = threshold if threshold is not None else 0
-
-        # Add rotation information to results
+        # Add method and threshold information to results
+        results["edge_method"] = edge_method
+        results["threshold"] = threshold
         results["roi_rotation"] = self.roi_rotation
 
         return results
-
-    # Renamed from _extracted_from_process_and_analyze_58
-    def _extracted_from_process_and_analyze_58(self, threshold, group, element):
-        logger.debug(f"Using threshold detection with value {threshold}")
-        self.boundaries, self.derivative, self.transition_types = (
-            find_line_pair_boundaries_threshold(self.profile, threshold)
-        )
-        edge_method = "threshold"
-        logger.debug(
-            f"Found {len(self.boundaries)} boundaries with threshold {threshold}"
-        )
-        return self._create_analysis_results_with_method(group, element, edge_method)
-
-    def analyze_profile_with_edge_method(self, edge_method, group, element):
-        """
-        Analyze the profile using the specified edge detection method.
-        Args:
-            edge_method: The edge detection method to use ('original', 'parallel', etc.)
-            group: USAF group number
-            element: USAF group element
-        Returns:
-            Dictionary with analysis results, including profile type and edge method.
-        """
-        logger.debug(f"Using {edge_method} edge detection method")
-        self.detect_edges(edge_method=edge_method)
-        logger.debug(
-            f"Found {len(self.boundaries) if self.boundaries else 0} boundaries with {edge_method} method"
-        )
-
-        return self._create_analysis_results_with_method(group, element, edge_method)
-
-    # Renamed from _extracted_from_analyze_profile_with_edge_method_11
-    def _create_analysis_results_with_method(self, group, element, edge_method):
-        result = self.analyze_profile(group, element)
-        result["profile_type"] = "max"
-        result["edge_method"] = edge_method
-        return result
 
 
 # --- Streamlit UI Functions ---
@@ -2141,40 +2157,58 @@ def handle_image_selection(
     unique_id = keys["coordinates"].split("_")[1]
     component_key = f"{key}_{unique_id}"
 
-    # No rotation is applied to the display image - we only want to rotate the extracted ROI
-    coords_component_output = streamlit_image_coordinates(
-        image_to_display, key=component_key, click_and_drag=True
+    # Use st_canvas for rectangle selection
+    pil_img = Image.fromarray(image_to_display)
+    canvas_result = st_canvas(
+        fill_color="rgba(255, 0, 0, 0.3)",
+        stroke_width=2,
+        stroke_color="red",
+        background_image=pil_img,
+        update_streamlit=True,
+        height=pil_img.height,
+        width=pil_img.width,
+        drawing_mode="rect",
+        key=component_key,
+        display_toolbar=False,
     )
     roi_changed = False
+    # Only process if a rectangle is drawn
     if (
-        coords_component_output is not None
-        and coords_component_output.get("x1") is not None
-        and coords_component_output.get("x2") is not None
-        and coords_component_output.get("y1") is not None
-        and coords_component_output.get("y2") is not None
+        canvas_result.json_data is not None
+        and len(canvas_result.json_data["objects"]) > 0
     ):
-        # Get coordinates from the component output
-        point1 = (coords_component_output["x1"], coords_component_output["y1"])
-        point2 = (coords_component_output["x2"], coords_component_output["y2"])
-
-        if point1[0] != point2[0] and point1[1] != point2[1]:
-            current_coordinates = st.session_state.get(coordinates_key)
-            if current_coordinates != (point1, point2):
-                # Store the coordinates in the session state
-                st.session_state[coordinates_key] = (point1, point2)
-                is_valid = (
-                    point1[0] >= 0
-                    and point1[1] >= 0
-                    and point2[0] >= 0
-                    and point2[1] >= 0
-                    and abs(point2[0] - point1[0]) > 0
-                    and abs(point2[1] - point1[1]) > 0
-                )
-                st.session_state[roi_valid_key] = is_valid
-                roi_changed = True
-                logger.debug(
-                    f"ROI updated for image {idx}: {point1} to {point2}, valid: {is_valid}"
-                )
+        rect = next(
+            (
+                obj
+                for obj in reversed(canvas_result.json_data["objects"])
+                if obj["type"] == "rect"
+            ),
+            None,
+        )
+        if rect is not None:
+            x1 = int(rect["left"])
+            y1 = int(rect["top"])
+            x2 = int(rect["left"] + rect["width"])
+            y2 = int(rect["top"] + rect["height"])
+            point1 = (x1, y1)
+            point2 = (x2, y2)
+            if point1[0] != point2[0] and point1[1] != point2[1]:
+                current_coordinates = st.session_state.get(coordinates_key)
+                if current_coordinates != (point1, point2):
+                    st.session_state[coordinates_key] = (point1, point2)
+                    is_valid = (
+                        point1[0] >= 0
+                        and point1[1] >= 0
+                        and point2[0] >= 0
+                        and point2[1] >= 0
+                        and abs(point2[0] - point1[0]) > 0
+                        and abs(point2[1] - point1[1]) > 0
+                    )
+                    st.session_state[roi_valid_key] = is_valid
+                    roi_changed = True
+                    logger.debug(
+                        f"ROI updated for image {idx}: {point1} to {point2}, valid: {is_valid}"
+                    )
     return roi_changed
 
 
@@ -2358,6 +2392,24 @@ def create_analysis_settings_form(state_vars, keys, roi_tuple, image):
     """Create analysis settings UI with instant apply via on_change callbacks."""
     unique_id = state_vars["autoscale_key"].split("_")[1]
 
+    # --- Robust session state initialization for all relevant keys ---
+    # These defaults should match those in initialize_image_session_state
+    session_defaults = {
+        state_vars["autoscale_key"]: True,
+        state_vars["invert_key"]: False,
+        state_vars["normalize_key"]: False,
+        state_vars["saturated_pixels_key"]: 0.5,
+        state_vars["equalize_histogram_key"]: True,
+        state_vars["magnification_key"]: state_vars.get("default_magnification", 10.0),
+        state_vars["threshold_key"]: 50,
+        state_vars["roi_rotation_key"]: 0,
+        keys["group"]: state_vars.get("default_group", 2),
+        keys["element"]: state_vars.get("default_element", 2),
+    }
+    for k, v in session_defaults.items():
+        if k not in st.session_state or st.session_state[k] is None:
+            st.session_state[k] = v
+
     # Use the provided ROI tuple for threshold calculation
     default_threshold, max_threshold = get_default_threshold(roi_tuple, image)
 
@@ -2510,34 +2562,15 @@ def create_analysis_settings_form(state_vars, keys, roi_tuple, image):
 
 def display_roi_selection(idx, uploaded_file, image, keys):
     """Display ROI selection interface and show ROI validity status."""
-    pil_img = Image.fromarray(image)
-    draw = ImageDraw.Draw(pil_img)
-
-    # Draw current ROI if it exists
-    current_coords = st.session_state.get(keys["coordinates"])
-    if current_coords:
-        p1, p2 = current_coords
-        coords = (
-            min(p1[0], p2[0]),
-            min(p1[1], p2[1]),
-            max(p1[0], p2[0]),
-            max(p1[1], p2[1]),
-        )
-        if roi_valid := st.session_state.get(keys["roi_valid"], False):
-            color_idx = idx % len(ROI_COLORS)
-            outline_color = ROI_COLORS[color_idx]
-        else:
-            outline_color = INVALID_ROI_COLOR
-        draw.rectangle(coords, outline=outline_color, width=3)
-
-    # Display image for ROI selection
+    # Remove ImageDraw rectangle drawing, just use the canvas for selection
     st.markdown("#### Select ROI on Image")
     handle_image_selection(
-        idx, uploaded_file, pil_img, key=f"usaf_image_{idx}", rotation=0
+        idx, uploaded_file, image, key=f"usaf_image_{idx}", rotation=0
     )
 
     # Show ROI validity status
     roi_valid = st.session_state.get(keys["roi_valid"], False)
+    current_coords = st.session_state.get(keys["coordinates"])
     if current_coords is not None:
         if roi_valid:
             st.success("ROI selection is valid")
@@ -2590,7 +2623,14 @@ def display_analysis_results(keys, uploaded_file, image, state_vars):
         )
 
         if fig is not None:
-            st.pyplot(fig)
+            # Clear any existing plots
+            plt.close("all")
+
+            # Display the figure
+            st.pyplot(fig, use_container_width=True)
+
+            # Close the figure to free memory
+            plt.close(fig)
 
             # Add download button
             create_download_button(
@@ -2748,9 +2788,8 @@ def run_image_analysis(keys, state_vars, image, temp_path, current_roi_tuple):
                 # Clear settings changed flag after processing
                 st.session_state[state_vars["settings_changed_key"]] = False
 
-                # Set the rerun flag before triggering rerun
+                # Set the rerun flag before rerun (this code will execute before rerun returns)
                 st.session_state[rerun_key] = True
-
                 # Rerun once to display results
                 st.rerun()
             except Exception as e:
