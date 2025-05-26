@@ -21,6 +21,7 @@ import matplotlib.patheffects as PathEffects
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import streamlit_nested_layout  # noqa: F401
 import tifffile
 from PIL import Image, ImageDraw
 from skimage import exposure, img_as_ubyte
@@ -2195,204 +2196,385 @@ def analyze_and_display_image(idx, uploaded_file):
     if st.session_state.get(settings_changed_key, False):
         st.session_state[settings_changed_key] = False
 
-    with st.expander(f"Image {idx+1}: {filename}", expanded=(idx == 0)):
-        # Display parsed defaults if found
-        if default_values:
-            values_str = ", ".join(
-                [
-                    f"Mag: {default_values['magnification']}×"
-                    if "magnification" in default_values
-                    else "",
-                    f"Group: {default_values['group']}"
-                    if "group" in default_values
-                    else "",
-                    f"Element: {default_values['element']}"
-                    if "element" in default_values
-                    else "",
-                ]
-            )
-            st.success(f"Detected from filename: {values_str}")
-
-        # Process the image
+    with st.expander(f"📸 Image {idx+1}: {filename}", expanded=(idx == 0)):
+        # Process the image first
         image, temp_path = process_uploaded_file(uploaded_file)
         if image is None:
-            st.error(f"Failed to load image: {filename}")
+            st.error(f"❌ Failed to load image: {filename}")
             return
         st.session_state[keys["image_path"]] = temp_path
 
-        # Display bit depth information
-        bit_depth = st.session_state.get(bit_depth_key, 8)
-        st.info(f"Image bit depth: {bit_depth}-bit (Range: 0-{(1 << bit_depth)-1})")
+        # Enhanced compact header with key information in 3 columns
+        header_col1, header_col2, header_col3 = st.columns([2, 1, 1])
 
-        # Extract ROI info for threshold calculation
-        roi_tuple = display_roi_info(idx, image)
-        default_threshold = 50
-        max_threshold = 255  # Hard cap at 255 to avoid uint8 overflow
-        if roi_tuple:
-            temp_roi = extract_roi_image(image, roi_tuple)
-            if temp_roi is not None:
-                profile_max = np.max(temp_roi, axis=0)
-                if len(profile_max) > 0:
-                    min_val = np.min(profile_max)
-                    max_val = np.max(profile_max)
-                    default_threshold = int(min_val + (max_val - min_val) * 0.4)
-                    # Ensure default_threshold is within valid range
-                    default_threshold = max(0, min(255, default_threshold))
-                    st.write(f"Profile range: {int(min_val)} to {int(max_val)}")
+        with header_col1:
+            # Display parsed defaults if found with enhanced styling
+            if default_values:
+                values_list = []
+                if "magnification" in default_values:
+                    values_list.append(f"🔍 {default_values['magnification']}×")
+                if "group" in default_values:
+                    values_list.append(f"📊 G{default_values['group']}")
+                if "element" in default_values:
+                    values_list.append(f"🎯 E{default_values['element']}")
 
-        # Settings without form - immediate updates
-        st.subheader("Analysis Settings")
+                if values_list:
+                    st.success(f"**Auto-detected:** {' • '.join(values_list)}")
+            else:
+                st.info("**Ready for analysis** - Configure settings below")
 
-        st.markdown("#### Target Parameters")
+        with header_col2:
+            # Display bit depth information compactly
+            bit_depth = st.session_state.get(bit_depth_key, 8)
+            st.info(f"**{bit_depth}-bit** (0-{(1 << bit_depth)-1})")
 
-        # Create tabs for better organization
-        tabs = st.tabs(["Target Properties", "Image Processing", "Analysis Options"])
+        with header_col3:
+            # Extract ROI info for threshold calculation and display profile range
+            roi_tuple = display_roi_info(idx, image)
+            default_threshold = 50
+            max_threshold = 255
+            if roi_tuple:
+                temp_roi = extract_roi_image(image, roi_tuple)
+                if temp_roi is not None:
+                    profile_max = np.max(temp_roi, axis=0)
+                    if len(profile_max) > 0:
+                        min_val = np.min(profile_max)
+                        max_val = np.max(profile_max)
+                        default_threshold = int(min_val + (max_val - min_val) * 0.4)
+                        default_threshold = max(0, min(255, default_threshold))
+                        st.metric("Profile Range", f"{int(min_val)}-{int(max_val)}")
+                    else:
+                        st.info("**Profile:** Not available")
+                else:
+                    st.info("**Profile:** Not available")
+            else:
+                st.info("**Profile:** Select ROI")
 
-        with tabs[0]:
-            # Group selector with horizontal radio buttons
-            st.subheader("Group")
-            selected_group = st.radio(
-                "Group",
-                options=[
-                    "-2",
-                    "-1",
-                    "0",
-                    "1",
-                    "2",
-                    "3",
-                    "4",
-                    "5",
-                    "6",
-                    "7",
-                    "8",
-                    "9",
-                ],
-                index=[
-                    "-2",
-                    "-1",
-                    "0",
-                    "1",
-                    "2",
-                    "3",
-                    "4",
-                    "5",
-                    "6",
-                    "7",
-                    "8",
-                    "9",
-                ].index(str(default_group))
-                if str(default_group)
-                in ["-2", "-1", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
-                else 2,
-                key=f"group_radio_{unique_id}",
-                horizontal=True,
-            )
+        st.markdown("---")  # Visual separator
 
-            # Element selector with radio buttons
-            st.subheader("Element")
-            selected_element = st.radio(
-                "Element",
-                options=["1", "2", "3", "4", "5", "6"],
-                index=int(default_element) - 1 if 0 < int(default_element) <= 6 else 0,
-                key=f"element_radio_{unique_id}",
-                horizontal=True,
-            )
+        # Enhanced tabs for better organization
+        settings_tab, roi_tab = st.tabs(["⚙️ Settings", "🎯 ROI & Analysis"])
 
-            # Magnification with number input and step buttons
-            magnification = st.number_input(
-                "Magnification (×)",
-                min_value=0.1,
-                max_value=1000.0,
-                value=st.session_state[magnification_key],
-                step=0.1,
-                format="%.1f",
-                key=f"magnification_widget_{unique_id}",
-                help="Set the optical magnification for display in the plot title",
-            )
+        with settings_tab:
+            # Organize settings in a more compact and logical layout
+            target_col, processing_col = st.columns([1, 1])
 
-        with tabs[1]:
-            # Use columns to organize contrast controls
-            col1, col2 = st.columns(2)
+            with target_col:
+                st.markdown("##### 🎯 Target Parameters")
 
-            with col1:
-                # Toggle for autoscale
-                autoscale = st.toggle(
-                    "Autoscale",
-                    value=st.session_state[autoscale_key],
-                    key=f"autoscale_widget_{unique_id}",
-                    help="Uses percentile-based contrast stretching based on saturated pixels value.",
+                # Group selector with horizontal radio buttons
+                selected_group = st.radio(
+                    "**Group**",
+                    options=[
+                        "-2",
+                        "-1",
+                        "0",
+                        "1",
+                        "2",
+                        "3",
+                        "4",
+                        "5",
+                        "6",
+                        "7",
+                        "8",
+                        "9",
+                    ],
+                    index=[
+                        "-2",
+                        "-1",
+                        "0",
+                        "1",
+                        "2",
+                        "3",
+                        "4",
+                        "5",
+                        "6",
+                        "7",
+                        "8",
+                        "9",
+                    ].index(str(default_group))
+                    if str(default_group)
+                    in ["-2", "-1", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+                    else 2,
+                    key=f"group_radio_{unique_id}",
+                    horizontal=True,
+                    help="USAF target group number",
                 )
 
-                # Toggle for normalize
-                normalize = st.toggle(
-                    "Normalize",
-                    value=st.session_state[normalize_key],
-                    key=f"normalize_widget_{unique_id}",
-                    help="Recalculate pixel values to use the full range (0-255 for 8-bit)",
+                # Element selector with radio buttons
+                selected_element = st.radio(
+                    "**Element**",
+                    options=["1", "2", "3", "4", "5", "6"],
+                    index=int(default_element) - 1
+                    if 0 < int(default_element) <= 6
+                    else 0,
+                    key=f"element_radio_{unique_id}",
+                    horizontal=True,
+                    help="USAF target element number",
                 )
 
-            with col2:
-                # Toggle for invert
-                invert = st.toggle(
-                    "Invert",
-                    value=st.session_state[invert_key],
-                    key=f"invert_widget_{unique_id}",
-                    help="Invert the image (useful for microscopy where dark = high signal)",
+                # Magnification with number input
+                magnification = st.number_input(
+                    "**Magnification (×)**",
+                    min_value=0.1,
+                    max_value=1000.0,
+                    value=st.session_state[magnification_key],
+                    step=0.1,
+                    format="%.1f",
+                    key=f"magnification_widget_{unique_id}",
+                    help="Optical magnification for display",
                 )
 
-                # Toggle for equalize histogram
-                equalize_histogram = st.toggle(
-                    "Equalize Histogram",
-                    value=st.session_state[equalize_histogram_key],
-                    key=f"equalize_histogram_widget_{unique_id}",
-                    help="Enhance image using histogram equalization",
+            with processing_col:
+                st.markdown("##### 🖼️ Image Processing")
+
+                # Organize toggles in a compact grid
+                toggle_col1, toggle_col2 = st.columns(2)
+
+                with toggle_col1:
+                    autoscale = st.toggle(
+                        "**Autoscale**",
+                        value=st.session_state[autoscale_key],
+                        key=f"autoscale_widget_{unique_id}",
+                        help="Percentile-based contrast",
+                    )
+
+                    normalize = st.toggle(
+                        "**Normalize**",
+                        value=st.session_state[normalize_key],
+                        key=f"normalize_widget_{unique_id}",
+                        help="Full range (0-255)",
+                    )
+
+                with toggle_col2:
+                    invert = st.toggle(
+                        "**Invert**",
+                        value=st.session_state[invert_key],
+                        key=f"invert_widget_{unique_id}",
+                        help="Invert colors",
+                    )
+
+                    equalize_histogram = st.toggle(
+                        "**Equalize**",
+                        value=st.session_state[equalize_histogram_key],
+                        key=f"equalize_histogram_widget_{unique_id}",
+                        help="Histogram equalization",
+                    )
+
+                # Saturated pixels slider (compact)
+                saturated_pixels = st.slider(
+                    "**Saturated Pixels (%)**",
+                    min_value=0.0,
+                    max_value=20.0,
+                    value=st.session_state[saturated_pixels_key],
+                    step=0.1,
+                    format="%.1f",
+                    key=f"saturated_pixels_widget_{unique_id}",
+                    disabled=not autoscale,
+                    help="Percentage of pixels to saturate",
                 )
 
-            # Add saturated pixels slider (only enabled if autoscale is on)
-            saturated_pixels = st.slider(
-                "Saturated Pixels (%)",
-                min_value=0.0,
-                max_value=20.0,
-                value=st.session_state[saturated_pixels_key],
-                step=0.1,
-                format="%.1f",
-                key=f"saturated_pixels_widget_{unique_id}",
-                help="Percentage of pixels allowed to become saturated",
-                disabled=not autoscale,
-            )
+            # Analysis options in a more compact layout
+            st.markdown("##### 🔍 Analysis Options")
+            analysis_col1, analysis_col2 = st.columns([2, 1])
 
-            st.info(
-                "Note: When 'Equalize Histogram' is enabled, 'Saturated Pixels' and 'Normalize' settings are ignored."
-            )
+            with analysis_col1:
+                threshold = st.slider(
+                    "**Threshold Line**",
+                    min_value=0,
+                    max_value=max_threshold,
+                    value=int(st.session_state.get(threshold_key, default_threshold)),
+                    key=f"threshold_widget_{unique_id}",
+                    help="Edge detection threshold",
+                )
 
-        with tabs[2]:
-            st.markdown(
-                "**Using Max Intensity Profile** - for detecting edges in noisy images"
-            )
-            # Threshold slider
-            threshold = st.slider(
-                "Threshold Line",
-                min_value=0,
-                max_value=max_threshold,  # Limit to 255
-                value=int(st.session_state.get(threshold_key, default_threshold)),
-                key=f"threshold_widget_{unique_id}",
-                help="Adjust the threshold line to find edges where the intensity crosses this value",
-            )
+            with analysis_col2:
+                prev_rotation = st.session_state.get(roi_rotation_key, 0)
+                rotation_options = ["0°", "90°", "180°", "270°"]
 
-            # ROI rotation controls
-            prev_rotation = st.session_state.get(roi_rotation_key, 0)
-            rotation_options = ["0°", "90°", "180°", "270°"]
-            rotation_idx = prev_rotation
+                selected_rotation = st.radio(
+                    "**ROI Rotation**",
+                    options=rotation_options,
+                    index=prev_rotation,
+                    horizontal=True,
+                    key=f"roi_rotation_radio_{unique_id}",
+                    help="Rotate extracted ROI",
+                )
+                new_rotation = rotation_options.index(selected_rotation)
 
-            selected_rotation = st.radio(
-                "ROI Rotation",
-                options=rotation_options,
-                index=rotation_idx,
-                horizontal=True,
-                key=f"roi_rotation_radio_{unique_id}",
-                help="Rotate the extracted ROI in 90° increments after selection",
-            )
-            new_rotation = rotation_options.index(selected_rotation)
+        with roi_tab:
+            # Enhanced main analysis area with improved layout
+            roi_col, result_col = st.columns([1, 1])
+
+            with roi_col:
+                st.markdown("##### 🎯 Select Region of Interest")
+
+                # Prepare image for ROI selection
+                pil_img = Image.fromarray(image)
+                draw = ImageDraw.Draw(pil_img)
+                current_coords = st.session_state.get(keys["coordinates"])
+
+                if current_coords:
+                    p1, p2 = current_coords
+                    coords = (
+                        min(p1[0], p2[0]),
+                        min(p1[1], p2[1]),
+                        max(p1[0], p2[0]),
+                        max(p1[1], p2[1]),
+                    )
+                    roi_valid = st.session_state.get(keys["roi_valid"], False)
+                    if roi_valid:
+                        color_idx = idx % len(ROI_COLORS)
+                        outline_color = ROI_COLORS[color_idx]
+                    else:
+                        outline_color = INVALID_ROI_COLOR
+                    draw.rectangle(coords, outline=outline_color, width=3)
+
+                # Display image for ROI selection
+                roi_changed = handle_image_selection(
+                    idx, uploaded_file, pil_img, key=f"usaf_image_{idx}", rotation=0
+                )
+
+                # Trigger analysis if ROI changed
+                if roi_changed:
+                    st.session_state[settings_changed_key] = True
+
+                # Enhanced compact status display
+                roi_valid = st.session_state.get(keys["roi_valid"], False)
+                if current_coords is not None:
+                    if roi_valid:
+                        st.success("✅ **Valid ROI selected** - Ready for analysis")
+                    else:
+                        st.error("❌ **Invalid ROI** - Please reselect area")
+                else:
+                    st.info("👆 **Click and drag** to select analysis region")
+
+            with result_col:
+                st.markdown("##### 📊 Analysis Results")
+
+                # Show analysis results or preview with enhanced layout
+                if analysis_results_for_plot := st.session_state.get(
+                    keys["analysis_results"]
+                ):
+                    # Get ROI rotation from analysis results
+                    roi_rotation = analysis_results_for_plot.get("roi_rotation", 0)
+
+                    # Extract ROI with rotation
+                    roi_for_display = extract_roi_image(
+                        image,
+                        st.session_state.get(keys["analyzed_roi"]),
+                        rotation=roi_rotation,
+                    )
+
+                    magnification = st.session_state.get(magnification_key, 10.0)
+                    # Generate the figure using ProfileVisualizer
+                    visualizer = ProfileVisualizer()
+                    lp_width_um = None
+                    group_val = st.session_state.get(keys["last_group"])
+                    element_val = st.session_state.get(keys["last_element"])
+                    if (
+                        group_val is not None
+                        and element_val is not None
+                        and "usaf_target" in st.session_state
+                    ):
+                        lp_width_um = (
+                            st.session_state.usaf_target.line_pair_width_microns(
+                                group_val, element_val
+                            )
+                        )
+                    fig = visualizer.visualize_profile(
+                        analysis_results_for_plot,
+                        roi_for_display,
+                        group=group_val,
+                        element=element_val,
+                        lp_width_um=lp_width_um,
+                        magnification=magnification,
+                    )
+                    if fig is not None:
+                        st.pyplot(fig)
+
+                        # Enhanced compact download section
+                        buf = io.BytesIO()
+                        fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+                        buf.seek(0)
+
+                        # Generate filename
+                        pixel_size_str = "NA"
+                        if (
+                            lp_width_um is not None
+                            and analysis_results_for_plot.get("avg_line_pair_width", 0)
+                            > 0
+                        ):
+                            pixel_size = (
+                                lp_width_um
+                                / analysis_results_for_plot["avg_line_pair_width"]
+                            )
+                            pixel_size_str = f"{pixel_size:.3f}um"
+                        group_str = (
+                            f"group{group_val}" if group_val is not None else "groupNA"
+                        )
+                        mag_str = (
+                            f"mag{int(round(magnification))}x"
+                            if magnification is not None
+                            else "magNA"
+                        )
+                        file_name = f"usaf_processed_{group_str}_pix{pixel_size_str}_{mag_str}.png"
+
+                        st.download_button(
+                            label="📥 Download Plot",
+                            data=buf,
+                            file_name=file_name,
+                            mime="image/png",
+                            use_container_width=True,
+                        )
+
+                        # Show caption below download button with better formatting
+                        caption = visualizer.create_caption(
+                            group_val,
+                            element_val,
+                            lp_width_um,
+                            edge_method=analysis_results_for_plot.get(
+                                "edge_method", "original"
+                            ),
+                        )
+                        st.markdown(caption, unsafe_allow_html=True)
+
+                elif current_coords_for_preview := st.session_state.get(
+                    keys["coordinates"]
+                ):
+                    try:
+                        p1_preview, p2_preview = current_coords_for_preview
+                        coords_preview = (
+                            min(p1_preview[0], p2_preview[0]),
+                            min(p1_preview[1], p2_preview[1]),
+                            max(p1_preview[0], p2_preview[0]),
+                            max(p1_preview[1], p2_preview[1]),
+                        )
+
+                        # Get current ROI rotation for preview
+                        roi_rotation = st.session_state.get(roi_rotation_key, 0)
+
+                        # Extract the ROI from the unrotated image
+                        roi_img_preview = pil_img.crop(coords_preview)
+
+                        # Apply rotation to the preview if needed
+                        if roi_rotation > 0:
+                            roi_img_preview = Image.fromarray(
+                                rotate_image(np.array(roi_img_preview), roi_rotation)
+                            )
+
+                        st.image(
+                            roi_img_preview,
+                            caption="🔍 ROI Preview",
+                            use_container_width=True,
+                        )
+                        st.info(
+                            "💡 **Adjust settings** and the analysis will update automatically"
+                        )
+                    except Exception as e:
+                        st.warning(f"⚠️ Could not display ROI preview: {e!s}")
+                else:
+                    st.info("👆 **Select an ROI above** to view analysis results")
 
         # Check for changes and update session state
         settings_changed = False
@@ -2444,172 +2626,12 @@ def analyze_and_display_image(idx, uploaded_file):
         if settings_changed:
             st.session_state[settings_changed_key] = True
 
-        # Rest of the display remains unchanged...
-        pil_img = Image.fromarray(image)
-        draw = ImageDraw.Draw(pil_img)
-        current_coords = st.session_state.get(keys["coordinates"])
-        if current_coords:
-            p1, p2 = current_coords
-            coords = (
-                min(p1[0], p2[0]),
-                min(p1[1], p2[1]),
-                max(p1[0], p2[0]),
-                max(p1[1], p2[1]),
-            )
-            if roi_valid := st.session_state.get(keys["roi_valid"], False):
-                color_idx = idx % len(ROI_COLORS)
-                outline_color = ROI_COLORS[color_idx]
-            else:
-                outline_color = INVALID_ROI_COLOR
-            draw.rectangle(coords, outline=outline_color, width=3)
-        roi_col, plot_col = st.columns([1, 1])
-        with roi_col:
-            st.markdown("#### Select ROI on Image")
-
-            # Always display the original image for ROI selection (no rotation)
-            roi_changed = handle_image_selection(
-                idx, uploaded_file, pil_img, key=f"usaf_image_{idx}", rotation=0
-            )
-
-            # Trigger analysis if ROI changed
-            if roi_changed:
-                st.session_state[settings_changed_key] = True
-
-            # Status display for ROI validity
-            roi_valid = st.session_state.get(keys["roi_valid"], False)
-            if current_coords is not None:
-                if roi_valid:
-                    st.success("ROI selection is valid")
-                else:
-                    st.error(
-                        "ROI selection is not valid. Please select a valid region."
-                    )
-
-        # Continue with the rest of the function...
-        with plot_col:
-            # Show processed image/plot and download button
-            if analysis_results_for_plot := st.session_state.get(
-                keys["analysis_results"]
-            ):
-                # Get ROI rotation from analysis results
-                roi_rotation = analysis_results_for_plot.get("roi_rotation", 0)
-
-                # Extract ROI with rotation
-                roi_for_display = extract_roi_image(
-                    image,
-                    st.session_state.get(keys["analyzed_roi"]),
-                    rotation=roi_rotation,
-                )
-
-                unique_id = get_unique_id_for_image(uploaded_file)
-                magnification = st.session_state.get(magnification_key, 10.0)
-                # Generate the figure using ProfileVisualizer
-                visualizer = ProfileVisualizer()
-                lp_width_um = None
-                group_val = st.session_state.get(keys["last_group"])
-                element_val = st.session_state.get(keys["last_element"])
-                if (
-                    group_val is not None
-                    and element_val is not None
-                    and "usaf_target" in st.session_state
-                ):
-                    lp_width_um = st.session_state.usaf_target.line_pair_width_microns(
-                        group_val, element_val
-                    )
-                fig = visualizer.visualize_profile(
-                    analysis_results_for_plot,
-                    roi_for_display,
-                    group=group_val,
-                    element=element_val,
-                    lp_width_um=lp_width_um,
-                    magnification=magnification,
-                )
-                if fig is not None:
-                    st.pyplot(fig)
-                    # Add download button for the processed image
-                    buf = io.BytesIO()
-                    fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
-                    buf.seek(0)
-                    # Compose filename with group, pixel size, and mag
-                    pixel_size_str = "NA"
-                    if (
-                        lp_width_um is not None
-                        and analysis_results_for_plot.get("avg_line_pair_width", 0) > 0
-                    ):
-                        pixel_size = (
-                            lp_width_um
-                            / analysis_results_for_plot["avg_line_pair_width"]
-                        )
-                        pixel_size_str = f"{pixel_size:.3f}um"
-                    group_str = (
-                        f"group{group_val}" if group_val is not None else "groupNA"
-                    )
-                    mag_str = (
-                        f"mag{int(round(magnification))}x"
-                        if magnification is not None
-                        else "magNA"
-                    )
-                    file_name = (
-                        f"usaf_processed_{group_str}_pix{pixel_size_str}_{mag_str}.png"
-                    )
-                    st.download_button(
-                        label="Download Processed Image (PNG)",
-                        data=buf,
-                        file_name=file_name,
-                        mime="image/png",
-                    )
-                    # Show caption below download button
-                    caption = visualizer.create_caption(
-                        group_val,
-                        element_val,
-                        lp_width_um,
-                        edge_method=analysis_results_for_plot.get(
-                            "edge_method", "original"
-                        ),
-                    )
-                    st.markdown(caption, unsafe_allow_html=True)
-            elif current_coords_for_preview := st.session_state.get(
-                keys["coordinates"]
-            ):
-                try:
-                    p1_preview, p2_preview = current_coords_for_preview
-                    coords_preview = (
-                        min(p1_preview[0], p2_preview[0]),
-                        min(p1_preview[1], p2_preview[1]),
-                        max(p1_preview[0], p2_preview[0]),
-                        max(p1_preview[1], p2_preview[1]),
-                    )
-
-                    # Get current ROI rotation for preview
-                    roi_rotation = st.session_state.get(roi_rotation_key, 0)
-
-                    # Extract the ROI from the unrotated image
-                    roi_img_preview = pil_img.crop(coords_preview)
-
-                    # Apply rotation to the preview if needed
-                    if roi_rotation > 0:
-                        roi_img_preview = Image.fromarray(
-                            rotate_image(np.array(roi_img_preview), roi_rotation)
-                        )
-
-                    st.image(
-                        roi_img_preview,
-                        caption="Selected ROI Preview",
-                        use_container_width=True,
-                    )
-                except Exception as e:
-                    st.warning(f"Could not display ROI preview: {e!s}")
-            else:
-                st.info("Select an ROI to view analysis.")
-
         # Get parameters for analysis
-        keys = get_image_session_keys(idx, uploaded_file)
         current_selected_roi_tuple = display_roi_info(idx, image)
         group_for_trigger = st.session_state.get(keys["group"])
         element_for_trigger = st.session_state.get(keys["element"])
         roi_is_valid = st.session_state.get(keys["roi_valid"], False)
         threshold = st.session_state.get(threshold_key, 50)
-        # Ensure threshold is within valid range
         threshold = max(0, min(255, threshold))
 
         # Get current ROI rotation
@@ -2625,7 +2647,7 @@ def analyze_and_display_image(idx, uploaded_file):
         )
 
         if should_analyze:
-            with st.spinner("Analyzing image..."):
+            with st.spinner("🔄 Analyzing image..."):
                 try:
                     logging.getLogger().setLevel(logging.DEBUG)
                     img_proc = ImageProcessor(
@@ -2652,7 +2674,7 @@ def analyze_and_display_image(idx, uploaded_file):
                         element_for_trigger,
                         use_max=True,
                         threshold=threshold,
-                        roi_rotation=roi_rotation,  # Pass ROI rotation to the processor
+                        roi_rotation=roi_rotation,
                         **processing_params,
                     )
 
@@ -2665,29 +2687,22 @@ def analyze_and_display_image(idx, uploaded_file):
                     # Clear settings changed flag after processing
                     st.session_state[settings_changed_key] = False
 
+                    # Show success message
+                    st.success("✅ **Analysis completed successfully!**")
+
                     # Rerun once to display results
                     st.rerun()
                 except Exception as e:
                     logger.error(f"Analysis failed: {e}")
-                    st.error(f"Analysis failed: {e!s}")
-                    # Include more detailed error information to help debugging
-                    st.error(f"Error details: {type(e).__name__} - {e!s}")
-                    import traceback
+                    st.error(f"❌ **Analysis failed:** {e!s}")
+                    st.error(f"**Error details:** {type(e).__name__} - {e!s}")
 
-                    st.error(f"Stack trace: {traceback.format_exc()}")
-
+        # Display analysis details in a collapsible section with better organization
         if analysis_results_for_details := st.session_state.get(
             keys["analysis_results"]
         ):
-            st.markdown(
-                "<hr style='margin-top: 1.5rem; margin-bottom: 1.5rem;'>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                "<h4 style='text-align: center; margin-top: 1.5rem;'>Analysis Details</h4>",
-                unsafe_allow_html=True,
-            )
-            display_analysis_details(analysis_results_for_details)
+            with st.expander("📈 **Detailed Analysis Results**", expanded=False):
+                display_analysis_details(analysis_results_for_details)
 
 
 def collect_analysis_data():
@@ -2770,25 +2785,93 @@ def collect_analysis_data():
 
 def run_streamlit_app():
     try:
-        st.set_page_config(page_title="USAF Target Analyzer", layout="wide")
+        st.set_page_config(
+            page_title="USAF Target Analyzer",
+            layout="wide",
+            page_icon="🎯",
+            initial_sidebar_state="expanded",
+        )
         initialize_session_state()
-        st.title("USAF Target Analyzer")
+
+        # Enhanced page header with better styling
+        st.title("🎯 USAF Target Analyzer")
         st.markdown(
             """
-        <style>
-        .stExpander {margin-top: 0.5rem !important;}
-        .plot-container {margin-bottom: 0.5rem;}
-        </style>
-        """,
+            <div style='text-align: center; color: #666; margin-bottom: 2rem;'>
+                <p><em>Comprehensive analysis tool for USAF 1951 resolution targets in microscopy and imaging systems</em></p>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
+
+        # Enhanced CSS styling for better visual appearance
+        st.markdown(
+            """
+            <style>
+            .stExpander {
+                margin-top: 0.5rem !important;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            .stExpander > div:first-child {
+                background-color: #f8f9fa;
+                border-radius: 8px 8px 0 0;
+            }
+            .plot-container {
+                margin-bottom: 0.5rem;
+            }
+            .metric-container {
+                background-color: #f0f2f6;
+                padding: 0.5rem;
+                border-radius: 4px;
+                text-align: center;
+            }
+            .stTabs [data-baseweb="tab-list"] {
+                gap: 8px;
+            }
+            .stTabs [data-baseweb="tab"] {
+                height: 50px;
+                padding-left: 20px;
+                padding-right: 20px;
+                border-radius: 8px 8px 0px 0px;
+                background-color: #f0f2f6;
+            }
+            .stTabs [data-baseweb="tab"][aria-selected="true"] {
+                background-color: #ffffff;
+                border-bottom: 2px solid #1f77b4;
+            }
+            .sidebar-section {
+                margin-bottom: 1.5rem;
+                padding: 1rem;
+                background-color: #f8f9fa;
+                border-radius: 8px;
+                border: 1px solid #e9ecef;
+            }
+            .status-banner {
+                background: linear-gradient(90deg, #e8f4fd 0%, #f0f8ff 100%);
+                padding: 1rem;
+                border-radius: 8px;
+                margin-bottom: 1rem;
+                text-align: center;
+                border: 1px solid #b3d9ff;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
         with st.sidebar:
-            st.header("Controls")
+            st.markdown("### 🎛️ **Control Panel**")
+            st.markdown("---")
+
+            # Upload section with enhanced styling
+            st.markdown("#### 📁 **Upload Images**")
             if new_uploaded_files := st.file_uploader(
-                "Upload USAF target image(s)",
+                "Select USAF target image(s)",
                 type=["jpg", "jpeg", "png", "tif", "tiff"],
                 accept_multiple_files=True,
-                help="Select one or more images containing a USAF 1951 resolution target",
+                help="Upload one or more images containing a USAF 1951 resolution target",
             ):
                 for file in new_uploaded_files:
                     file_names = [
@@ -2800,30 +2883,95 @@ def run_streamlit_app():
                     )
                     if new_file_name not in file_names:
                         st.session_state.uploaded_files_list.append(file)
-                        st.success(f"Added: {new_file_name}")
+                        st.success(f"✅ **Added:** {new_file_name}")
 
-            # Add information about the features in the sidebar
+            # Current analysis status with enhanced display
+            if st.session_state.uploaded_files_list:
+                st.markdown("#### 📊 **Current Analysis**")
+                st.info(
+                    f"**{len(st.session_state.uploaded_files_list)}** image(s) loaded"
+                )
+
+                # Show analysis progress
+                analyzed_count = 0
+                for idx, uploaded_file in enumerate(
+                    st.session_state.uploaded_files_list
+                ):
+                    keys = get_image_session_keys(idx, uploaded_file)
+                    if st.session_state.get(keys["analysis_results"]):
+                        analyzed_count += 1
+
+                if analyzed_count > 0:
+                    st.success(f"**{analyzed_count}** image(s) analyzed")
+                else:
+                    st.warning("**No images analyzed yet**")
+
             st.markdown("---")
-            st.markdown("### Analysis Tips")
-            st.info("""
-            **Image Rotation**: Each image has a rotation slider to help align line pairs horizontally for better analysis. 
-            Use this feature when your USAF target is tilted.
-            """)
 
-            # Add CSV download button
+            # Enhanced tips section with expandable help
+            st.markdown("#### 💡 **Analysis Tips**")
+            with st.expander("🔄 **Image Rotation**", expanded=False):
+                st.markdown("""
+                Use the **ROI Rotation** controls to align line pairs horizontally 
+                for optimal analysis when your USAF target appears tilted in the image.
+                
+                **Tip:** Most accurate results occur when line pairs are horizontal.
+                """)
+
+            with st.expander("🎯 **ROI Selection**", expanded=False):
+                st.markdown("""
+                - **Click and drag** on the image to select your region of interest
+                - Select an area containing **clear line pairs**
+                - Ensure the ROI is **large enough** to capture multiple line pairs
+                - The ROI outline will be **green** when valid, **red** when invalid
+                
+                **Best practices:**
+                - Include at least 3-5 line pairs in your ROI
+                - Avoid edges and artifacts
+                - Center the ROI on the clearest part of the target
+                """)
+
+            with st.expander("⚙️ **Settings Guide**", expanded=False):
+                st.markdown("""
+                **Image Processing:**
+                - **Autoscale**: Automatic contrast adjustment (recommended)
+                - **Normalize**: Use full intensity range
+                - **Invert**: Flip dark/light (useful for some microscopy images)
+                - **Equalize**: Enhance contrast using histogram equalization
+                
+                **Analysis:**
+                - **Threshold**: Adjust edge detection sensitivity
+                - **Group/Element**: Select the USAF target pattern to analyze
+                """)
+
+            with st.expander("📏 **Understanding Results**", expanded=False):
+                st.markdown("""
+                **Key Metrics:**
+                - **Line Pairs/mm**: Spatial frequency of the target
+                - **Pixel Size**: Physical size per pixel in micrometers
+                - **Contrast**: Measure of image sharpness
+                - **Line Pair Width**: Theoretical width in micrometers
+                
+                **Quality Indicators:**
+                - Higher contrast = better image quality
+                - More detected line pairs = better resolution
+                """)
+
             st.markdown("---")
-            st.markdown("### Export Results")
 
-            if st.button("Generate Analysis CSV"):
+            # Enhanced export section
+            st.markdown("#### 📤 **Export Results**")
+
+            if st.button("📊 **Generate Analysis CSV**", use_container_width=True):
                 if not st.session_state.uploaded_files_list:
-                    st.warning("No images have been uploaded for analysis.")
+                    st.warning("⚠️ No images uploaded for analysis.")
                 else:
                     # Collect data and create DataFrame
                     df = collect_analysis_data()
 
                     if df.empty:
                         st.warning(
-                            "No analysis data available. Please analyze images first."
+                            "⚠️ No analysis data available. Please analyze images first."
                         )
                     else:
                         # Create CSV string
@@ -2831,16 +2979,24 @@ def run_streamlit_app():
 
                         # Create download button
                         st.download_button(
-                            label="Download Analysis CSV",
+                            label="📥 **Download CSV**",
                             data=csv,
                             file_name="usaf_analysis_results.csv",
                             mime="text/csv",
+                            use_container_width=True,
                         )
 
-                        # Show preview
-                        st.markdown("#### CSV Preview")
-                        st.dataframe(df, use_container_width=True)
+                        # Show preview in an expander
+                        with st.expander("👀 **CSV Preview**", expanded=False):
+                            st.dataframe(df, use_container_width=True)
+                            st.info(f"**{len(df)}** analysis results ready for export")
 
+            st.markdown("---")
+
+            # Enhanced management section
+            st.markdown("#### 🗂️ **Manage Images**")
+
+            # Load default image
             default_image_path = load_default_image()
             if (
                 not st.session_state.uploaded_files_list
@@ -2849,12 +3005,15 @@ def run_streamlit_app():
             ):
                 st.session_state.uploaded_files_list.append(default_image_path)
                 st.session_state.default_image_added = True
-                st.info(f"Using default image: {os.path.basename(default_image_path)}")
-            if st.button("Clear All Images"):
+                st.info(
+                    f"📷 **Default image loaded:** {os.path.basename(default_image_path)}"
+                )
+
+            if st.button("🗑️ **Clear All Images**", use_container_width=True):
                 st.session_state.uploaded_files_list = []
                 st.session_state.default_image_added = False
                 st.session_state.image_index_to_id = {}
-                st.success("All images cleared")
+                st.success("✅ **All images cleared**")
                 for key in list(st.session_state.keys()):
                     if any(
                         key.startswith(prefix)
@@ -2862,21 +3021,50 @@ def run_streamlit_app():
                     ):
                         del st.session_state[key]
                 st.rerun()
+
+            # Add helpful footer
+            st.markdown("---")
+            st.markdown(
+                """
+                <div style='text-align: center; color: #666; font-size: 0.8em; margin-top: 1rem;'>
+                    <p>💡 <strong>Need help?</strong> Expand the tips sections above</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # Enhanced main content area
         main_container = st.container()
         with main_container:
             if st.session_state.uploaded_files_list:
-                st.info(
-                    f"Currently analyzing {len(st.session_state.uploaded_files_list)} image(s)"
+                # Enhanced status banner
+                st.markdown(
+                    f"""
+                    <div class='status-banner'>
+                        <h4 style='margin: 0; color: #1f77b4;'>
+                            📊 Currently analyzing <strong>{len(st.session_state.uploaded_files_list)}</strong> image(s)
+                        </h4>
+                        <p style='margin: 0.5rem 0 0 0; color: #666; font-size: 0.9em;'>
+                            Select ROI regions and adjust settings for each image below
+                        </p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
+
+                # Process each image with enhanced organization
                 for idx, uploaded_file in enumerate(
                     st.session_state.uploaded_files_list
                 ):
                     analyze_and_display_image(idx, uploaded_file)
             else:
                 display_welcome_screen()
+
     except Exception as e:
-        st.error(f"Error: {e}")
-        st.info("For detailed error information, set DEBUG=1 in environment variables.")
+        st.error(f"❌ **Application Error:** {e}")
+        st.info(
+            "💡 For detailed error information, set DEBUG=1 in environment variables."
+        )
 
 
 if __name__ == "__main__":
