@@ -14,8 +14,6 @@ import tempfile
 import time
 from typing import Any
 
-# Import configuration
-import config
 import cv2
 import matplotlib.patheffects as PathEffects
 import matplotlib.pyplot as plt
@@ -38,10 +36,47 @@ logging.basicConfig(
 )
 
 # --- Constants ---
-SESSION_STATE_PREFIXES = config.SESSION_STATE_PREFIXES
-DEFAULT_IMAGE_PATH = config.DEFAULT_IMAGE_PATH
-ROI_COLORS = config.ROI_COLORS
-INVALID_ROI_COLOR = config.INVALID_ROI_COLOR
+# File Paths
+DEFAULT_IMAGE_PATH = os.path.expanduser(
+    "~/Library/CloudStorage/Box-Box/FOIL/Aaron/2025-05-12/airforcetarget_images/AF_2_2_00001.png"
+)
+
+# ROI Colors
+ROI_COLORS = [
+    "#00FF00",
+    "#FF00FF",
+    "#00FFFF",
+    "#FFFF00",
+    "#FF8000",
+    "#0080FF",
+    "#8000FF",
+    "#FF0080",
+]
+INVALID_ROI_COLOR = "#FF0000"  # Red for invalid ROIs
+
+# Session State Prefixes
+SESSION_STATE_PREFIXES = [
+    "group_",
+    "element_",
+    "analyzed_roi_",
+    "analysis_results_",
+    "last_group_",
+    "last_element_",
+    "coordinates_",
+    "image_path_",
+    "image_name_",
+    "roi_valid_",
+]
+
+# UI Defaults
+DEFAULT_GROUP = 2
+DEFAULT_ELEMENT = 2
+
+# Welcome screen constants
+WELCOME_IMAGE_URL = (
+    "https://upload.wikimedia.org/wikipedia/commons/d/d6/1951usaf_test_target.jpg"
+)
+WELCOME_IMAGE_CAPTION = "Example USAF 1951 Target"
 
 # --- Utility Functions ---
 
@@ -376,9 +411,7 @@ def get_unique_id_for_image(image_file) -> str:
 
 
 def load_default_image():
-    return (
-        config.DEFAULT_IMAGE_PATH if os.path.exists(config.DEFAULT_IMAGE_PATH) else None
-    )
+    return DEFAULT_IMAGE_PATH if os.path.exists(DEFAULT_IMAGE_PATH) else None
 
 
 def process_uploaded_file(uploaded_file) -> tuple[np.ndarray | None, str | None]:
@@ -2086,8 +2119,8 @@ def display_welcome_screen():
     col1, col2 = st.columns([1, 2])
     with col1:
         st.image(
-            config.WELCOME_IMAGE_URL,
-            caption=config.WELCOME_IMAGE_CAPTION,
+            WELCOME_IMAGE_URL,
+            caption=WELCOME_IMAGE_CAPTION,
             use_container_width=True,
         )
     with col2:
@@ -2149,8 +2182,8 @@ def analyze_and_display_image(idx, uploaded_file):
 
     # Parse filename to get default values for magnification, group, and element
     default_values = parse_filename_for_defaults(filename)
-    default_group = default_values.get("group", config.DEFAULT_GROUP)
-    default_element = default_values.get("element", config.DEFAULT_ELEMENT)
+    default_group = default_values.get("group", DEFAULT_GROUP)
+    default_element = default_values.get("element", DEFAULT_ELEMENT)
     default_magnification = default_values.get("magnification", 10.0)
 
     # Get unique ID for this image
@@ -2889,7 +2922,7 @@ def run_streamlit_app():
                         for key in list(st.session_state.keys()):
                             if any(
                                 key.startswith(prefix)
-                                for prefix in config.SESSION_STATE_PREFIXES
+                                for prefix in SESSION_STATE_PREFIXES
                             ):
                                 del st.session_state[key]
                         st.rerun()
