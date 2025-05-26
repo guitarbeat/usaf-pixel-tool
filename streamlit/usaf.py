@@ -8,12 +8,11 @@ A comprehensive tool for analyzing USAF 1951 resolution targets in microscopy an
 import hashlib
 import io
 import logging
-import math
 import os
 import re  # Add import for regex
 import tempfile
 import time
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple
 
 # Import configuration
 import config
@@ -649,16 +648,6 @@ def extract_roi_image(
         return None
 
 
-def save_analysis_results(results: Dict[str, Any]) -> str:
-    data = {"Parameter": [], "Value": []}
-    for key, value in results.items():
-        if isinstance(value, (int, float, str)) and not key.startswith("_"):
-            data["Parameter"].append(key)
-            data["Value"].append(value)
-    df = pd.DataFrame(data)
-    return df.to_csv(index=False)
-
-
 def initialize_session_state():
     if "usaf_target" not in st.session_state:
         st.session_state.usaf_target = USAFTarget()
@@ -763,28 +752,6 @@ class USAFTarget:
 
     def line_pair_width_microns(self, group: int, element: int) -> float:
         return 1000.0 / self.lp_per_mm(group, element)
-
-    def resolution_to_group_element(
-        self, resolution_um: float
-    ) -> Dict[str, Union[int, float]]:
-        if resolution_um <= 0:
-            return {"group": 0, "element": 1, "exact_group": 0, "exact_element": 1}
-        lp_per_mm = 1000.0 / resolution_um
-        log2_result = math.log2(lp_per_mm / self.base_lp_per_mm)
-        exact_group = int(log2_result)
-        exact_element = round(((log2_result - exact_group) * 6) + 1)
-        if exact_element > 6:
-            exact_group += 1
-            exact_element = 1
-        elif exact_element < 1:
-            exact_group -= 1
-            exact_element = 6
-        return {
-            "group": exact_group,
-            "element": exact_element,
-            "exact_group": log2_result,
-            "exact_element": ((log2_result - exact_group) * 6) + 1,
-        }
 
 
 def detect_significant_transitions(profile):
@@ -1116,38 +1083,6 @@ class RoiManager:
             logger.error(f"Error extracting ROI: {e}")
             return None
 
-    def draw_on_image(self, pil_img, color="#00FF00", width=3):
-        """
-        Draw the ROI on a PIL image
-
-        Args:
-            pil_img: PIL.Image to draw on
-            color: Color to use for the ROI outline
-            width: Width of the outline
-
-        Returns:
-            PIL.Image: Image with ROI drawn
-        """
-        if self.coordinates is None:
-            return pil_img
-
-        draw = ImageDraw.Draw(pil_img)
-        p1, p2 = self.coordinates
-        coords = (
-            min(p1[0], p2[0]),
-            min(p1[1], p2[1]),
-            max(p1[0], p2[0]),
-            max(p1[1], p2[1]),
-        )
-
-        draw.rectangle(coords, outline=color, width=width)
-        return pil_img
-
-    @property
-    def as_tuple(self):
-        """Get ROI as (x, y, width, height) tuple"""
-        return self.roi_tuple
-
 
 class ProfileVisualizer:
     """
@@ -1161,7 +1096,7 @@ class ProfileVisualizer:
 
         # Define colors for different elements
         self.light_to_dark_color = "#FF4500"  # Orange-red
-        self.dark_to_light_color = "#00BFFF"  # Deep sky blue
+
         self.annotation_color = "#FFFF99"  # Yellow
         self.profile_color = "#2c3e50"  # Dark blue-gray
         self.individual_profile_color = "#6b88b6"  # Light blue
@@ -1358,42 +1293,6 @@ class ProfileVisualizer:
         ax.set_xlabel("Position (pixels)", fontsize=12)
         # Increased label font size
         ax.set_ylabel("Intensity (a.u.)", fontsize=12)
-
-    def draw_transition_lines(self, ax_profile, ax_img, boundaries, transition_types):
-        """Draw vertical lines for each detected transition in both plots"""
-        line_style = "-"
-        for i, (boundary, trans_type) in enumerate(zip(boundaries, transition_types)):
-            if trans_type == -1:  # Light-to-dark
-                line_color = self.light_to_dark_color
-                label = "Light → Dark" if i == 0 else ""
-            else:  # Dark-to-light
-                line_color = self.dark_to_light_color
-                label = (
-                    "Dark → Light"
-                    if i == 0 or (i == 1 and transition_types[0] != 1)
-                    else ""
-                )
-
-            # Draw on profile plot
-            ax_profile.axvline(
-                x=boundary,
-                color=line_color,
-                linestyle=line_style,
-                alpha=0.7,
-                linewidth=1.5,
-                zorder=4,
-                label=label,
-            )
-
-            # Draw on image
-            ax_img.axvline(
-                x=boundary,
-                color=line_color,
-                linestyle="--",
-                alpha=0.6,
-                linewidth=0.8,
-                zorder=3,
-            )
 
     def find_line_pairs(self, boundaries, roi_img):
         """
@@ -1630,54 +1529,6 @@ class ProfileVisualizer:
         # Return the figure - the caller is responsible for displaying it using st.pyplot(fig)
         return fig
 
-    def display_in_streamlit(
-        self, results, roi_img, group=None, element=None, magnification=None
-    ):
-        """
-        Create visualization and display it in Streamlit
-        Args:
-            results: Analysis results dictionary
-            roi_img: The ROI image to display
-            group: USAF target group
-            element: USAF target element
-            magnification: User-provided magnification value
-        """
-        # Get theoretical line pair width if possible
-        lp_width_um = None
-        # Get Line Pairs per mm from results
-        lp_per_mm = results.get("lp_per_mm", None)
-
-        if (
-            group is not None
-            and element is not None
-            and "usaf_target" in st.session_state
-        ):
-            lp_width_um = st.session_state.usaf_target.line_pair_width_microns(
-                group, element
-            )
-
-        edge_method = results.get("edge_method", "original")
-
-        # Create visualization
-        fig = self.visualize_profile(
-            results, roi_img, group, element, lp_width_um, magnification
-        )
-
-        if fig is not None:
-            # Display figure
-            st.pyplot(fig)
-            # Display caption
-            caption = self.create_caption(
-                group,
-                element,
-                lp_width_um,
-                edge_method=edge_method,
-                lp_per_mm=lp_per_mm,
-            )
-            st.markdown(caption, unsafe_allow_html=True)
-            return True
-        return False
-
 
 class ImageProcessor:
     def __init__(self, usaf_target: USAFTarget = None):
@@ -1695,7 +1546,7 @@ class ImageProcessor:
         self.transition_types = None
         self.derivative = None
         self.line_pair_widths = []
-        self.line_pair_positions = []
+
         self.dark_regions = []
         self.light_regions = []
         self.contrast = 0.0
@@ -1894,9 +1745,6 @@ class ImageProcessor:
             logger.error(f"Error getting line profile: {e}")
             return None
 
-    def get_individual_profiles(self) -> Optional[np.ndarray]:
-        return self.individual_profiles
-
     def detect_edges(self, edge_method="original"):
         if self.profile is None:
             logger.error("No profile available for edge detection")
@@ -1910,84 +1758,6 @@ class ImageProcessor:
                 find_line_pair_boundaries_derivative(self.profile)
             )
         return len(self.boundaries) > 0
-
-    def identify_line_pairs(self):
-        """
-        Identify line pairs from the detected edges.
-
-        Returns:
-            int: Number of line pairs identified
-        """
-        if self.boundaries is None or self.transition_types is None:
-            return 0
-
-        self.line_pair_widths = []
-        self.line_pair_positions = []
-
-        # Find all light-to-dark transitions (red lines)
-        red_indices = [
-            i for i, trans_type in enumerate(self.transition_types) if trans_type == -1
-        ]
-
-        # For each pair of consecutive red lines, check if there's a blue line in between
-        for j in range(len(red_indices) - 1):
-            start_idx = red_indices[j]
-            end_idx = red_indices[j + 1]
-            start_pos = self.boundaries[start_idx]
-            end_pos = self.boundaries[end_idx]
-
-            has_blue_between = any(
-                i < len(
-                    self.transition_types) and self.transition_types[i] == 1
-                for i in range(start_idx + 1, end_idx)
-            )
-            if has_blue_between:
-                # This is a complete line pair: red-blue-red
-                width = end_pos - start_pos
-                if width > 0:
-                    self.line_pair_widths.append(width)
-                    self.line_pair_positions.append((start_pos, end_pos))
-
-        return len(self.line_pair_widths)
-
-    def estimate_line_pairs_from_bars(self):
-        """
-        Estimate line pairs based on dark bar widths if direct line pair detection fails.
-
-        Returns:
-            int: Number of estimated line pairs
-        """
-        if len(self.line_pair_widths) > 0 or len(self.boundaries) < 4:
-            return len(self.line_pair_widths)
-
-        # Look for each dark bar (from light-to-dark to dark-to-light)
-        dark_bar_widths = []
-        dark_bar_positions = []
-
-        for i in range(len(self.boundaries) - 1):
-            if (
-                i + 1 < len(self.transition_types)
-                and self.transition_types[i] == -1
-                and self.transition_types[i + 1] == 1
-            ):
-                # This is a dark bar from light-to-dark (red) to dark-to-light (blue)
-                start_pos = self.boundaries[i]
-                end_pos = self.boundaries[i + 1]
-                dark_width = end_pos - start_pos
-
-                if dark_width > 0:
-                    dark_bar_widths.append(dark_width)
-                    dark_bar_positions.append((start_pos, end_pos))
-
-        # Estimate line pair widths (each line pair = dark bar + light bar of equal width)
-        if dark_bar_widths:
-            avg_dark_width = np.mean(dark_bar_widths)
-            for start_pos, _ in dark_bar_positions:
-                # Line pair width = 2 * dark bar width (dark + light bar)
-                estimated_lp_width = avg_dark_width * 2
-                self.line_pair_widths.append(estimated_lp_width)
-
-        return len(self.line_pair_widths)
 
     def calculate_contrast(self):
         """
@@ -2078,10 +1848,10 @@ class ImageProcessor:
 
             # Step 2: Use only the best two line pairs
             self.line_pair_widths = []
-        self.line_pair_positions = []
+
         if self.boundaries is not None and len(self.boundaries) >= 3:
             best_pairs, avg_width = find_best_two_line_pairs(self.boundaries)
-            self.line_pair_positions = best_pairs
+
             self.line_pair_widths = [end - start for start, end in best_pairs]
             self.avg_line_pair_width = avg_width
             logger.debug(
@@ -2234,80 +2004,7 @@ class ImageProcessor:
         return result
 
 
-# Keep ProfileAnalyzer for backward compatibility
-class ProfileAnalyzer:
-    def __init__(self, usaf_target: USAFTarget = None):
-        self.usaf_target = usaf_target or USAFTarget()
-
-    def analyze_profile(self, profile: np.ndarray, group: int, element: int) -> Dict:
-        # Create a temporary ImageProcessor to reuse the analysis code
-        img_proc = ImageProcessor(self.usaf_target)
-        # Set the profile directly
-        img_proc.profile = profile
-        # Run the analysis
-        return img_proc.analyze_profile(group, element)
-
-
 # --- Streamlit UI Functions ---
-
-
-def group_element_selectors(idx, default_group=None, default_element=None):
-    if default_group is None:
-        default_group = config.DEFAULT_GROUP
-    if default_element is None:
-        default_element = config.DEFAULT_ELEMENT
-    keys = get_image_session_keys(idx)
-    if keys["group"] not in st.session_state:
-        st.session_state[keys["group"]] = default_group
-    if keys["element"] not in st.session_state:
-        st.session_state[keys["element"]] = default_element
-    if keys["coordinates"] not in st.session_state:
-        st.session_state[keys["coordinates"]] = None
-    col_g, col_e = st.columns(2)
-    with col_g:
-        group = st.number_input(
-            "Group",
-            value=st.session_state[keys["group"]],
-            min_value=-2,
-            max_value=9,
-            key=keys["group"],
-        )
-    with col_e:
-        element = st.number_input(
-            "Element",
-            value=st.session_state[keys["element"]],
-            min_value=1,
-            max_value=6,
-            key=keys["element"],
-        )
-    return group, element
-
-
-def display_metrics_row(results):
-    group = results.get("group")
-    element = results.get("element")
-    lp_width_um = (
-        st.session_state.usaf_target.line_pair_width_microns(group, element)
-        if group is not None and element is not None
-        else None
-    )
-    metric_cols = st.columns(4)
-    metrics = [
-        ("Line Pairs per mm", f"{results['lp_per_mm']:.2f}"),
-        (
-            "Line Pair Width (μm)",
-            f"{lp_width_um:.2f}" if lp_width_um is not None else "-",
-        ),
-        ("Contrast",
-         f"{results['contrast']:.2f}" if "contrast" in results else "-"),
-        ("Line Pairs Detected", f"{results['num_line_pairs']}"),
-    ]
-    for i, (label, value) in enumerate(metrics):
-        with metric_cols[i]:
-            st.markdown(
-                f"<div style='font-size:1.1em'><b>{label}:</b> {value}</div>",
-                unsafe_allow_html=True,
-            )
 
 
 def display_roi_info(idx: int, image=None) -> Optional[Tuple[int, int, int, int]]:
@@ -2471,42 +2168,6 @@ def display_analysis_details(results):
         st.latex(
             r"\text{Implied Pixel Size (µm/pixel)} = \text{N/A (requires measurement)}"
         )
-
-
-def analyze_image_with_analyzer(image_path, roi, group, element, analyzer=None):
-    """
-    Analyze an image with a custom ProfileAnalyzer for custom sensitivity settings.
-
-    Args:
-        image_path: Path to the image file
-        roi: Region of interest tuple (x, y, width, height)
-        group: USAF group number
-        element: USAF element number
-        analyzer: Optional custom ProfileAnalyzer with threshold and min_distance settings
-
-    Returns:
-        Tuple of (analysis results dict, intensity profile)
-    """
-    # Create an ImageProcessor with the analyzer's settings if provided
-    if analyzer is not None:
-        img_proc = ImageProcessor(
-            usaf_target=analyzer.usaf_target,
-        )
-    else:
-        img_proc = ImageProcessor(usaf_target=st.session_state.usaf_target)
-
-    # Use the new process_and_analyze method
-    results = img_proc.process_and_analyze(image_path, roi, group, element)
-
-    # Return the profile for backwards compatibility
-    profile = img_proc.profile
-
-    return results, profile
-
-
-def analyze_image(image_path, roi, group, element):
-    """Original analyze_image function kept for backwards compatibility"""
-    return analyze_image_with_analyzer(image_path, roi, group, element)
 
 
 def analyze_and_display_image(idx, uploaded_file):
@@ -2969,14 +2630,14 @@ def analyze_and_display_image(idx, uploaded_file):
         threshold = st.session_state.get(threshold_key, 50)
         # Ensure threshold is within valid range
         threshold = max(0, min(255, threshold))
-        threshold_changed = threshold != st.session_state.get(
+        threshold != st.session_state.get(
             f"last_threshold_{unique_id}", 0
         )
         st.session_state[f"last_threshold_{unique_id}"] = threshold
 
         # Get current ROI rotation
         roi_rotation = st.session_state.get(roi_rotation_key, 0)
-        roi_rotation_changed = roi_rotation != st.session_state.get(
+        roi_rotation != st.session_state.get(
             last_roi_rotation_key, 0
         )
 
@@ -3055,19 +2716,6 @@ def analyze_and_display_image(idx, uploaded_file):
                 unsafe_allow_html=True,
             )
             display_analysis_details(analysis_results_for_details)
-
-
-def plot_intensity_profile(
-    results, annotated_roi_img=None, group=None, element=None, magnification=None
-):
-    """
-    Plot the intensity profile and analysis results.
-    This is now a thin wrapper around ProfileVisualizer for backward compatibility.
-    """
-    visualizer = ProfileVisualizer()
-    visualizer.display_in_streamlit(
-        results, annotated_roi_img, group, element, magnification
-    )
 
 
 def collect_analysis_data():
