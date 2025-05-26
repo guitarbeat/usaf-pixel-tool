@@ -2789,269 +2789,237 @@ def run_streamlit_app():
             page_title="USAF Target Analyzer",
             layout="wide",
             page_icon="🎯",
-            initial_sidebar_state="expanded",
+            initial_sidebar_state="collapsed",  # Collapse sidebar since we're not using it
         )
         initialize_session_state()
 
         # Enhanced page header with better styling
         st.title("🎯 USAF Target Analyzer")
-        st.markdown(
-            """
-            <div style='text-align: center; color: #666; margin-bottom: 2rem;'>
-                <p><em>Comprehensive analysis tool for USAF 1951 resolution targets in microscopy and imaging systems</em></p>
-            </div>
+        st.subheader(
+            """Comprehensive analysis tool for USAF 1951 resolution targets in microscopy and imaging systems
             """,
-            unsafe_allow_html=True,
         )
 
-        # Enhanced CSS styling for better visual appearance
-        st.markdown(
-            """
-            <style>
-            .stExpander {
-                margin-top: 0.5rem !important;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }
-            .stExpander > div:first-child {
-                background-color: #f8f9fa;
-                border-radius: 8px 8px 0 0;
-            }
-            .plot-container {
-                margin-bottom: 0.5rem;
-            }
-            .metric-container {
-                background-color: #f0f2f6;
-                padding: 0.5rem;
-                border-radius: 4px;
-                text-align: center;
-            }
-            .stTabs [data-baseweb="tab-list"] {
-                gap: 8px;
-            }
-            .stTabs [data-baseweb="tab"] {
-                height: 50px;
-                padding-left: 20px;
-                padding-right: 20px;
-                border-radius: 8px 8px 0px 0px;
-                background-color: #f0f2f6;
-            }
-            .stTabs [data-baseweb="tab"][aria-selected="true"] {
-                background-color: #ffffff;
-                border-bottom: 2px solid #1f77b4;
-            }
-            .sidebar-section {
-                margin-bottom: 1.5rem;
-                padding: 1rem;
-                background-color: #f8f9fa;
-                border-radius: 8px;
-                border: 1px solid #e9ecef;
-            }
-            .status-banner {
-                background: linear-gradient(90deg, #e8f4fd 0%, #f0f8ff 100%);
-                padding: 1rem;
-                border-radius: 8px;
-                margin-bottom: 1rem;
-                text-align: center;
-                border: 1px solid #b3d9ff;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
+        # Control Panel at the top of the main area
+        with st.container():
+            st.markdown('<div class="control-panel">', unsafe_allow_html=True)
 
-        with st.sidebar:
-            st.markdown("### 🎛️ **Control Panel**")
-            st.markdown("---")
+            # Create tabs for different control sections
+            upload_tab, manage_tab, export_tab, help_tab = st.tabs(
+                [
+                    "📁 Upload & Status",
+                    "🗂️ Manage Images",
+                    "📤 Export Results",
+                    "💡 Help & Tips",
+                ]
+            )
 
-            # Upload section with enhanced styling
-            st.markdown("#### 📁 **Upload Images**")
-            if new_uploaded_files := st.file_uploader(
-                "Select USAF target image(s)",
-                type=["jpg", "jpeg", "png", "tif", "tiff"],
-                accept_multiple_files=True,
-                help="Upload one or more images containing a USAF 1951 resolution target",
-            ):
-                for file in new_uploaded_files:
-                    file_names = [
-                        f.name if hasattr(f, "name") else os.path.basename(f)
-                        for f in st.session_state.uploaded_files_list
-                    ]
-                    new_file_name = (
-                        file.name if hasattr(file, "name") else os.path.basename(file)
-                    )
-                    if new_file_name not in file_names:
-                        st.session_state.uploaded_files_list.append(file)
-                        st.success(f"✅ **Added:** {new_file_name}")
+            with upload_tab:
+                col1, col2 = st.columns([2, 1])
 
-            # Current analysis status with enhanced display
-            if st.session_state.uploaded_files_list:
-                st.markdown("#### 📊 **Current Analysis**")
-                st.info(
-                    f"**{len(st.session_state.uploaded_files_list)}** image(s) loaded"
-                )
+                with col1:
+                    st.markdown("#### 📁 **Upload Images**")
+                    if new_uploaded_files := st.file_uploader(
+                        "Select USAF target image(s)",
+                        type=["jpg", "jpeg", "png", "tif", "tiff"],
+                        accept_multiple_files=True,
+                        help="Upload one or more images containing a USAF 1951 resolution target",
+                    ):
+                        for file in new_uploaded_files:
+                            file_names = [
+                                f.name if hasattr(f, "name") else os.path.basename(f)
+                                for f in st.session_state.uploaded_files_list
+                            ]
+                            new_file_name = (
+                                file.name
+                                if hasattr(file, "name")
+                                else os.path.basename(file)
+                            )
+                            if new_file_name not in file_names:
+                                st.session_state.uploaded_files_list.append(file)
+                                st.success(f"✅ **Added:** {new_file_name}")
 
-                # Show analysis progress
-                analyzed_count = 0
-                for idx, uploaded_file in enumerate(
-                    st.session_state.uploaded_files_list
-                ):
-                    keys = get_image_session_keys(idx, uploaded_file)
-                    if st.session_state.get(keys["analysis_results"]):
-                        analyzed_count += 1
-
-                if analyzed_count > 0:
-                    st.success(f"**{analyzed_count}** image(s) analyzed")
-                else:
-                    st.warning("**No images analyzed yet**")
-
-            st.markdown("---")
-
-            # Enhanced tips section with expandable help
-            st.markdown("#### 💡 **Analysis Tips**")
-            with st.expander("🔄 **Image Rotation**", expanded=False):
-                st.markdown("""
-                Use the **ROI Rotation** controls to align line pairs horizontally 
-                for optimal analysis when your USAF target appears tilted in the image.
-                
-                **Tip:** Most accurate results occur when line pairs are horizontal.
-                """)
-
-            with st.expander("🎯 **ROI Selection**", expanded=False):
-                st.markdown("""
-                - **Click and drag** on the image to select your region of interest
-                - Select an area containing **clear line pairs**
-                - Ensure the ROI is **large enough** to capture multiple line pairs
-                - The ROI outline will be **green** when valid, **red** when invalid
-                
-                **Best practices:**
-                - Include at least 3-5 line pairs in your ROI
-                - Avoid edges and artifacts
-                - Center the ROI on the clearest part of the target
-                """)
-
-            with st.expander("⚙️ **Settings Guide**", expanded=False):
-                st.markdown("""
-                **Image Processing:**
-                - **Autoscale**: Automatic contrast adjustment (recommended)
-                - **Normalize**: Use full intensity range
-                - **Invert**: Flip dark/light (useful for some microscopy images)
-                - **Equalize**: Enhance contrast using histogram equalization
-                
-                **Analysis:**
-                - **Threshold**: Adjust edge detection sensitivity
-                - **Group/Element**: Select the USAF target pattern to analyze
-                """)
-
-            with st.expander("📏 **Understanding Results**", expanded=False):
-                st.markdown("""
-                **Key Metrics:**
-                - **Line Pairs/mm**: Spatial frequency of the target
-                - **Pixel Size**: Physical size per pixel in micrometers
-                - **Contrast**: Measure of image sharpness
-                - **Line Pair Width**: Theoretical width in micrometers
-                
-                **Quality Indicators:**
-                - Higher contrast = better image quality
-                - More detected line pairs = better resolution
-                """)
-
-            st.markdown("---")
-
-            # Enhanced export section
-            st.markdown("#### 📤 **Export Results**")
-
-            if st.button("📊 **Generate Analysis CSV**", use_container_width=True):
-                if not st.session_state.uploaded_files_list:
-                    st.warning("⚠️ No images uploaded for analysis.")
-                else:
-                    # Collect data and create DataFrame
-                    df = collect_analysis_data()
-
-                    if df.empty:
-                        st.warning(
-                            "⚠️ No analysis data available. Please analyze images first."
+                with col2:
+                    st.markdown("#### 📊 **Current Status**")
+                    if st.session_state.uploaded_files_list:
+                        st.info(
+                            f"**{len(st.session_state.uploaded_files_list)}** image(s) loaded"
                         )
-                    else:
-                        # Create CSV string
-                        csv = df.to_csv(index=False)
 
-                        # Create download button
+                        # Show analysis progress
+                        analyzed_count = 0
+                        for idx, uploaded_file in enumerate(
+                            st.session_state.uploaded_files_list
+                        ):
+                            keys = get_image_session_keys(idx, uploaded_file)
+                            if st.session_state.get(keys["analysis_results"]):
+                                analyzed_count += 1
+
+                        if analyzed_count > 0:
+                            st.success(f"**{analyzed_count}** image(s) analyzed")
+                        else:
+                            st.warning("**No images analyzed yet**")
+                    else:
+                        st.info("**No images loaded**")
+
+            with manage_tab:
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.markdown("#### 🗂️ **Image Management**")
+
+                    # Load default image
+                    default_image_path = load_default_image()
+                    if (
+                        not st.session_state.uploaded_files_list
+                        and default_image_path
+                        and not st.session_state.default_image_added
+                    ):
+                        st.session_state.uploaded_files_list.append(default_image_path)
+                        st.session_state.default_image_added = True
+                        st.info(
+                            f"📷 **Default image loaded:** {os.path.basename(default_image_path)}"
+                        )
+
+                    if st.button("🗑️ **Clear All Images**", use_container_width=True):
+                        st.session_state.uploaded_files_list = []
+                        st.session_state.default_image_added = False
+                        st.session_state.image_index_to_id = {}
+                        st.success("✅ **All images cleared**")
+                        for key in list(st.session_state.keys()):
+                            if any(
+                                key.startswith(prefix)
+                                for prefix in config.SESSION_STATE_PREFIXES
+                            ):
+                                del st.session_state[key]
+                        st.rerun()
+
+                with col2:
+                    if st.session_state.uploaded_files_list:
+                        st.markdown("#### 📋 **Loaded Images**")
+                        for idx, uploaded_file in enumerate(
+                            st.session_state.uploaded_files_list
+                        ):
+                            filename = (
+                                uploaded_file.name
+                                if hasattr(uploaded_file, "name")
+                                else os.path.basename(uploaded_file)
+                                if isinstance(uploaded_file, str)
+                                else f"Image {idx+1}"
+                            )
+                            keys = get_image_session_keys(idx, uploaded_file)
+                            status = (
+                                "✅ Analyzed"
+                                if st.session_state.get(keys["analysis_results"])
+                                else "⏳ Pending"
+                            )
+                            st.text(f"{idx+1}. {filename} - {status}")
+
+            with export_tab:
+                st.markdown("#### 📤 **Export Analysis Results**")
+
+                col1, col2 = st.columns([1, 1])
+
+                with col1:
+                    if st.button(
+                        "📊 **Generate Analysis CSV**", use_container_width=True
+                    ):
+                        if not st.session_state.uploaded_files_list:
+                            st.warning("⚠️ No images uploaded for analysis.")
+                        else:
+                            # Collect data and create DataFrame
+                            df = collect_analysis_data()
+
+                            if df.empty:
+                                st.warning(
+                                    "⚠️ No analysis data available. Please analyze images first."
+                                )
+                            else:
+                                # Create CSV string
+                                csv = df.to_csv(index=False)
+
+                                # Store in session state for download
+                                st.session_state["csv_data"] = csv
+                                st.session_state["csv_df"] = df
+                                st.success(
+                                    f"✅ **CSV generated with {len(df)} results**"
+                                )
+
+                with col2:
+                    if "csv_data" in st.session_state:
                         st.download_button(
                             label="📥 **Download CSV**",
-                            data=csv,
+                            data=st.session_state["csv_data"],
                             file_name="usaf_analysis_results.csv",
                             mime="text/csv",
                             use_container_width=True,
                         )
 
-                        # Show preview in an expander
-                        with st.expander("👀 **CSV Preview**", expanded=False):
-                            st.dataframe(df, use_container_width=True)
-                            st.info(f"**{len(df)}** analysis results ready for export")
+                        # Show preview
+                        if st.checkbox("👀 **Show CSV Preview**"):
+                            st.dataframe(
+                                st.session_state["csv_df"], use_container_width=True
+                            )
 
-            st.markdown("---")
+            with help_tab:
+                help_col1, help_col2 = st.columns(2)
 
-            # Enhanced management section
-            st.markdown("#### 🗂️ **Manage Images**")
+                with help_col1:
+                    st.markdown("#### 🎯 **ROI Selection Guide**")
+                    st.markdown("""
+                    - **Click and drag** on the image to select your region of interest
+                    - Select an area containing **clear line pairs**
+                    - Ensure the ROI is **large enough** to capture multiple line pairs
+                    - The ROI outline will be **green** when valid, **red** when invalid
+                    
+                    **Best practices:**
+                    - Include at least 3-5 line pairs in your ROI
+                    - Avoid edges and artifacts
+                    - Center the ROI on the clearest part of the target
+                    """)
 
-            # Load default image
-            default_image_path = load_default_image()
-            if (
-                not st.session_state.uploaded_files_list
-                and default_image_path
-                and not st.session_state.default_image_added
-            ):
-                st.session_state.uploaded_files_list.append(default_image_path)
-                st.session_state.default_image_added = True
-                st.info(
-                    f"📷 **Default image loaded:** {os.path.basename(default_image_path)}"
-                )
+                    st.markdown("#### 🔄 **Image Rotation**")
+                    st.markdown("""
+                    Use the **ROI Rotation** controls to align line pairs horizontally 
+                    for optimal analysis when your USAF target appears tilted in the image.
+                    
+                    **Tip:** Most accurate results occur when line pairs are horizontal.
+                    """)
 
-            if st.button("🗑️ **Clear All Images**", use_container_width=True):
-                st.session_state.uploaded_files_list = []
-                st.session_state.default_image_added = False
-                st.session_state.image_index_to_id = {}
-                st.success("✅ **All images cleared**")
-                for key in list(st.session_state.keys()):
-                    if any(
-                        key.startswith(prefix)
-                        for prefix in config.SESSION_STATE_PREFIXES
-                    ):
-                        del st.session_state[key]
-                st.rerun()
+                with help_col2:
+                    st.markdown("#### ⚙️ **Settings Guide**")
+                    st.markdown("""
+                    **Image Processing:**
+                    - **Autoscale**: Automatic contrast adjustment (recommended)
+                    - **Normalize**: Use full intensity range
+                    - **Invert**: Flip dark/light (useful for some microscopy images)
+                    - **Equalize**: Enhance contrast using histogram equalization
+                    
+                    **Analysis:**
+                    - **Threshold**: Adjust edge detection sensitivity
+                    - **Group/Element**: Select the USAF target pattern to analyze
+                    """)
 
-            # Add helpful footer
-            st.markdown("---")
-            st.markdown(
-                """
-                <div style='text-align: center; color: #666; font-size: 0.8em; margin-top: 1rem;'>
-                    <p>💡 <strong>Need help?</strong> Expand the tips sections above</p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+                    st.markdown("#### 📏 **Understanding Results**")
+                    st.markdown("""
+                    **Key Metrics:**
+                    - **Line Pairs/mm**: Spatial frequency of the target
+                    - **Pixel Size**: Physical size per pixel in micrometers
+                    - **Contrast**: Measure of image sharpness
+                    - **Line Pair Width**: Theoretical width in micrometers
+                    
+                    **Quality Indicators:**
+                    - Higher contrast = better image quality
+                    - More detected line pairs = better resolution
+                    """)
+
+            st.markdown("</div>", unsafe_allow_html=True)
 
         # Enhanced main content area
         main_container = st.container()
         with main_container:
             if st.session_state.uploaded_files_list:
                 # Enhanced status banner
-                st.markdown(
-                    f"""
-                    <div class='status-banner'>
-                        <h4 style='margin: 0; color: #1f77b4;'>
-                            📊 Currently analyzing <strong>{len(st.session_state.uploaded_files_list)}</strong> image(s)
-                        </h4>
-                        <p style='margin: 0.5rem 0 0 0; color: #666; font-size: 0.9em;'>
-                            Select ROI regions and adjust settings for each image below
-                        </p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
                 # Process each image with enhanced organization
                 for idx, uploaded_file in enumerate(
                     st.session_state.uploaded_files_list
