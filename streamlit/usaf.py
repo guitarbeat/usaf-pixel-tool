@@ -5,78 +5,29 @@ USAF 1951 Resolution Target Analyzer
 A comprehensive tool for analyzing USAF 1951 resolution targets in microscopy and imaging systems.
 """
 
-import contextlib
 import hashlib
 import io
 import logging
+import math
 import os
 import re  # Add import for regex
 import tempfile
 import time
-from typing import Any  # Add type hint imports
+from typing import Any, Dict, Optional, Tuple, Union
 
+# Import configuration
+import config
 import cv2
+import matplotlib.patheffects as PathEffects
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import sentry_sdk
-import streamlit_nested_layout  # type: ignore  # noqa: F401
 import tifffile
-from matplotlib import patheffects
 from PIL import Image, ImageDraw
 from skimage import exposure, img_as_ubyte
 from streamlit_image_coordinates import streamlit_image_coordinates
 
 import streamlit as st
-
-sentry_sdk.init(
-    dsn="https://90e0b71a002f0517b8bcae83d023e8ff@o4509363227197440.ingest.us.sentry.io/4509363256033280",
-    # Add data like request headers and IP for users,
-    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
-    send_default_pii=True,
-)
-
-# --- File Paths ---
-DEFAULT_IMAGE_PATH = os.path.expanduser(
-    "~/Library/CloudStorage/Box-Box/FOIL/Aaron/2025-05-12/airforcetarget_images/AF_2_2_00001.png"
-)
-
-# --- ROI Colors ---
-ROI_COLORS = [
-    "#00FF00",
-    "#FF00FF",
-    "#00FFFF",
-    "#FFFF00",
-    "#FF8000",
-    "#0080FF",
-    "#8000FF",
-    "#FF0080",
-]
-INVALID_ROI_COLOR = "#FF0000"  # Red for invalid ROIs
-
-# --- Session State Prefixes ---
-SESSION_STATE_PREFIXES = [
-    "group_",
-    "element_",
-    "analyzed_roi_",
-    "analysis_results_",
-    "last_group_",
-    "last_element_",
-    "coordinates_",
-    "image_path_",
-    "image_name_",
-    "roi_valid_",
-]
-
-# --- UI Defaults ---
-DEFAULT_GROUP = 2
-DEFAULT_ELEMENT = 2
-
-# --- Other UI Strings (optional, can be extended) ---
-WELCOME_IMAGE_URL = (
-    "https://upload.wikimedia.org/wikipedia/commons/d/d6/1951usaf_test_target.jpg"
-)
-WELCOME_IMAGE_CAPTION = "Example USAF 1951 Target"
 
 # --- Logging Setup ---
 logger = logging.getLogger(__name__)
@@ -87,22 +38,10 @@ logging.basicConfig(
 )
 
 # --- Constants ---
-# Image dimensions and channels
-MIN_IMAGE_DIMS = 2
-MAX_IMAGE_CHANNELS = 4
-RGB_CHANNELS = 3
-
-# Array dimensions and indices
-MIN_ARRAY_DIMS = 2
-MIN_ARRAY_LENGTH = 2
-MIN_ARRAY_SIZE = 2
-MIN_PAIRS = 2
-MIN_LINE_PAIRS = 2
-MIN_BOUNDARIES = 3
-ROI_COORDS_LENGTH = 4
-
-# USAF Target constants
-MAX_USAF_ELEMENT = 6
+SESSION_STATE_PREFIXES = config.SESSION_STATE_PREFIXES
+DEFAULT_IMAGE_PATH = config.DEFAULT_IMAGE_PATH
+ROI_COLORS = config.ROI_COLORS
+INVALID_ROI_COLOR = config.INVALID_ROI_COLOR
 
 # --- Utility Functions ---
 
@@ -117,13 +56,14 @@ def _get_effective_bit_depth(image: np.ndarray) -> int:
     if image.dtype == np.uint8:
         return 8
     max_val = np.max(image)
-    return next(
-        (bits for bits in (8, 10, 12, 14, 16, 32) if max_val <= (1 << bits) - 1),
-        16,
-    )
+    # Find the smallest bit depth that can represent max_val
+    for bits in (8, 10, 12, 14, 16, 32):
+        if max_val <= (1 << bits) - 1:
+            return bits
+    return 16  # fallback
 
 
-def parse_filename_for_defaults(filename: str) -> dict[str, Any]:
+def parse_filename_for_defaults(filename: str) -> Dict[str, Any]:
     """
     Parse filename to extract magnification and USAF target values.
 
@@ -143,18 +83,30 @@ def parse_filename_for_defaults(filename: str) -> dict[str, Any]:
         # Extract just the filename if a full path is given
         base_name = os.path.basename(filename)
 
-        if zoom_match := re.search(r"Zoom(\d+(?:\.\d+)?)", base_name, re.IGNORECASE):
-            with contextlib.suppress(ValueError, TypeError):
-                magnification = float(zoom_match[1])
+        # Look for magnification pattern: Zoom<number>
+        zoom_match = re.search(r"Zoom(\d+(?:\.\d+)?)",
+                               base_name, re.IGNORECASE)
+        if zoom_match:
+            try:
+                magnification = float(zoom_match.group(1))
                 result["magnification"] = magnification
-                logger.debug(f"Found magnification in filename: {magnification}")
-        if aft_match := re.search(r"AFT(\d)(\d)", base_name, re.IGNORECASE):
-            with contextlib.suppress(ValueError, TypeError, IndexError):
-                group = int(aft_match[1])
-                element = int(aft_match[2])
+                logger.debug(
+                    f"Found magnification in filename: {magnification}")
+            except (ValueError, TypeError):
+                pass
+
+        # Look for AFT pattern: AFT<group><element>
+        aft_match = re.search(r"AFT(\d)(\d)", base_name, re.IGNORECASE)
+        if aft_match:
+            try:
+                group = int(aft_match.group(1))
+                element = int(aft_match.group(2))
                 result["group"] = group
                 result["element"] = element
-                logger.debug(f"Found group {group}, element {element} in filename")
+                logger.debug(
+                    f"Found group {group}, element {element} in filename")
+            except (ValueError, TypeError, IndexError):
+                pass
     except Exception as e:
         logger.warning(f"Error parsing filename for defaults: {e}")
 
@@ -177,124 +129,26 @@ def rotate_image(image: np.ndarray, rotation_count: int) -> np.ndarray:
 
     try:
         # Normalize rotation count to 0-3
-        rotation_count %= 4
+        rotation_count = rotation_count % 4
 
-        return image if rotation_count == 0 else np.rot90(image, k=rotation_count)
+        if rotation_count == 0:
+            return image
+
+        # Apply rotation
+        return np.rot90(image, k=rotation_count)
     except Exception as e:
         logger.error(f"Error rotating image: {e}")
         return image  # Return original image on error
 
 
-def _process_multichannel_image(
-    image: np.ndarray, process_func: callable, **kwargs
-) -> np.ndarray:
-    """
-    Process a multi-channel image by applying a function to each channel.
-
-    Args:
-        image: Input image array
-        process_func: Function to apply to each channel
-        **kwargs: Additional arguments to pass to process_func
-
-    Returns:
-        Processed image array
-    """
-    if image.ndim <= MIN_IMAGE_DIMS or image.shape[-1] > MAX_IMAGE_CHANNELS:
-        return process_func(image, **kwargs)
-
-    result = np.zeros_like(image, dtype=np.uint8)
-    for c in range(image.shape[-1]):
-        try:
-            channel = image[..., c]
-            result[..., c] = process_func(channel, **kwargs)
-        except Exception as e:
-            logger.warning(f"Error processing channel {c}: {e}")
-            result[..., c] = np.zeros_like(channel, dtype=np.uint8)
-    return result
-
-
-def _normalize_channel_autoscale(
-    channel: np.ndarray, saturated_pixels: float = 0.5
-) -> np.ndarray:
-    """
-    Normalize a single channel using percentile-based contrast stretching.
-
-    Args:
-        channel: Input channel array
-        saturated_pixels: Percentage of pixels allowed to become saturated
-
-    Returns:
-        Normalized uint8 channel
-    """
-    try:
-        p_low, p_high = saturated_pixels / 2, 100 - saturated_pixels / 2
-        p_min, p_max = np.percentile(channel, (p_low, p_high))
-
-        if p_max <= p_min:
-            return np.zeros_like(channel, dtype=np.uint8)
-
-        return img_as_ubyte(
-            exposure.rescale_intensity(
-                channel, in_range=(p_min, p_max), out_range=(0, 255)
-            )
-        )
-    except Exception as e:
-        logger.warning(f"Error in autoscale normalization: {e}")
-        return _normalize_channel_simple(channel)
-
-
-def _normalize_channel_simple(channel: np.ndarray) -> np.ndarray:
-    """
-    Simple normalization of a channel to full range.
-
-    Args:
-        channel: Input channel array
-
-    Returns:
-        Normalized uint8 channel
-    """
-    min_val = np.min(channel)
-    max_val = np.max(channel)
-
-    if max_val <= min_val:
-        return np.zeros_like(channel, dtype=np.uint8)
-
-    return np.clip(((channel - min_val) / (max_val - min_val) * 255), 0, 255).astype(
-        np.uint8
-    )
-
-
-def _normalize_channel_bit_depth(channel: np.ndarray, bit_depth: int) -> np.ndarray:
-    """
-    Normalize a channel based on its bit depth.
-
-    Args:
-        channel: Input channel array
-        bit_depth: Effective bit depth of the image
-
-    Returns:
-        Normalized uint8 channel
-    """
-    try:
-        max_val = (1 << bit_depth) - 1
-        return img_as_ubyte(
-            exposure.rescale_intensity(
-                channel, in_range=(0, max_val), out_range=(0, 255)
-            )
-        )
-    except Exception as e:
-        logger.warning(f"Error in bit depth normalization: {e}")
-        return np.clip((channel / max_val * 255), 0, 255).astype(np.uint8)
-
-
 def normalize_to_uint8(
-    image: np.ndarray,
-    autoscale: bool = True,
-    invert: bool = False,
-    normalize: bool = False,
-    saturated_pixels: float = 0.5,
-    equalize_histogram: bool = False,
-) -> np.ndarray:
+    image,
+    autoscale=True,
+    invert=False,
+    normalize=False,
+    saturated_pixels=0.5,
+    equalize_histogram=False,
+):
     """
     Normalize image to uint8 (0-255) range with ImageJ-like contrast enhancement options.
 
@@ -318,40 +172,198 @@ def normalize_to_uint8(
     image_copy = image.copy()
 
     # Handle float images - scikit-image expects float images to be between -1 and 1
-    if np.issubdtype(image_copy.dtype, np.floating) and (
-        np.max(image_copy) > 1.0 or np.min(image_copy) < -1.0
-    ):
-        min_val = np.min(image_copy)
-        max_val = np.max(image_copy)
-        if max_val > min_val:
-            image_copy = (image_copy - min_val) / (max_val - min_val)
-        else:
-            image_copy = np.zeros_like(image_copy)
+    if np.issubdtype(image_copy.dtype, np.floating):
+        # Check if values are outside the expected range for float images
+        if np.max(image_copy) > 1.0 or np.min(image_copy) < -1.0:
+            # Normalize float values to 0-1 range
+            min_val = np.min(image_copy)
+            max_val = np.max(image_copy)
+            if max_val > min_val:
+                image_copy = (image_copy - min_val) / (max_val - min_val)
+            else:
+                image_copy = np.zeros_like(image_copy)
+
+    # Check if we're dealing with a multi-channel image
+    is_multichannel = image_copy.ndim > 2
 
     # Apply histogram equalization if requested (overrides other contrast adjustments)
     if equalize_histogram:
-        return _process_multichannel_image(
-            image_copy, lambda x: img_as_ubyte(exposure.equalize_hist(x))
-        )
+        # Handle RGB/RGBA images
+        if is_multichannel and image_copy.shape[-1] <= 4:
+            # Process each channel separately for equalization
+            result = np.zeros_like(image_copy, dtype=np.uint8)
+            for c in range(image_copy.shape[-1]):
+                channel = image_copy[..., c]
+                try:
+                    # Use skimage's equalize_hist function
+                    equalized = exposure.equalize_hist(channel)
+                    result[..., c] = img_as_ubyte(equalized)
+                except Exception as e:
+                    logger.warning(
+                        f"Error equalizing histogram for channel {c}: {e}")
+                    result[..., c] = img_as_ubyte(channel)
+            image_copy = result
+        else:
+            try:
+                # Apply equalization to grayscale image
+                equalized = exposure.equalize_hist(image_copy)
+                image_copy = img_as_ubyte(equalized)
+            except Exception as e:
+                logger.warning(f"Error equalizing histogram: {e}")
 
     # Only normalize if not already uint8 and not equalized
-    if image_copy.dtype != np.uint8 or normalize:
+    elif image_copy.dtype != np.uint8 or normalize:
+        # Determine effective bit depth (not just dtype, but actual data range)
         bit_depth = _get_effective_bit_depth(image_copy)
 
         if autoscale:
-            image_copy = _process_multichannel_image(
-                image_copy,
-                _normalize_channel_autoscale,
-                saturated_pixels=saturated_pixels,
-            )
+            # For multi-channel images, process each channel separately
+            # Handle RGB/RGBA images
+            if is_multichannel and image_copy.shape[-1] <= 4:
+                # Process each channel separately
+                result = np.zeros_like(image_copy, dtype=np.uint8)
+                for c in range(image_copy.shape[-1]):
+                    channel = image_copy[..., c]
+                    try:
+                        # Use percentiles based on saturated_pixels parameter (ImageJ-like)
+                        p_low, p_high = saturated_pixels / 2, 100 - saturated_pixels / 2
+                        p_min, p_max = np.percentile(channel, (p_low, p_high))
+
+                        # Ensure we don't divide by zero
+                        if p_max > p_min:
+                            # Rescale using skimage's exposure module
+                            channel_rescaled = exposure.rescale_intensity(
+                                channel, in_range=(
+                                    p_min, p_max), out_range=(0, 255)
+                            )
+                            result[..., c] = img_as_ubyte(channel_rescaled)
+                        else:
+                            result[..., c] = np.zeros_like(
+                                channel, dtype=np.uint8)
+                    except Exception as e:
+                        logger.warning(f"Error normalizing channel {c}: {e}")
+                        # Fallback to simple normalization
+                        min_val = np.min(channel)
+                        max_val = np.max(channel)
+                        if max_val > min_val:
+                            result[..., c] = np.clip(
+                                ((channel - min_val) / (max_val - min_val) * 255),
+                                0,
+                                255,
+                            ).astype(np.uint8)
+                        else:
+                            result[..., c] = np.zeros_like(
+                                channel, dtype=np.uint8)
+                image_copy = result
+            else:
+                # For grayscale or other images, process the whole array
+                try:
+                    # Use percentiles based on saturated_pixels parameter (ImageJ-like)
+                    p_low, p_high = saturated_pixels / 2, 100 - saturated_pixels / 2
+                    p_min, p_max = np.percentile(image_copy, (p_low, p_high))
+
+                    # Ensure we don't divide by zero
+                    if p_max > p_min:
+                        # Rescale using skimage's exposure module
+                        image_rescaled = exposure.rescale_intensity(
+                            image_copy, in_range=(
+                                p_min, p_max), out_range=(0, 255)
+                        )
+                        image_copy = img_as_ubyte(image_rescaled)
+                    else:
+                        # Fallback if the image has no contrast
+                        image_copy = np.zeros_like(image_copy, dtype=np.uint8)
+                except Exception as e:
+                    logger.warning(f"Error in rescale_intensity: {e}")
+                    # Fallback to simple normalization
+                    min_val = np.min(image_copy)
+                    max_val = np.max(image_copy)
+                    if max_val > min_val:
+                        image_copy = np.clip(
+                            ((image_copy - min_val) /
+                             (max_val - min_val) * 255), 0, 255
+                        ).astype(np.uint8)
+                    else:
+                        image_copy = np.zeros_like(image_copy, dtype=np.uint8)
         elif normalize:
-            image_copy = _process_multichannel_image(
-                image_copy, _normalize_channel_simple
-            )
+            # Normalize to full range without using percentiles
+            # For multi-channel images, process each channel separately
+            if is_multichannel and image_copy.shape[-1] <= 4:
+                result = np.zeros_like(image_copy, dtype=np.uint8)
+                for c in range(image_copy.shape[-1]):
+                    channel = image_copy[..., c]
+                    try:
+                        # Get actual min and max for normalization
+                        min_val = np.min(channel)
+                        max_val = np.max(channel)
+                        if max_val > min_val:
+                            # Normalize to full range
+                            channel_normalized = exposure.rescale_intensity(
+                                channel, in_range=(
+                                    min_val, max_val), out_range=(0, 255)
+                            )
+                            result[..., c] = img_as_ubyte(channel_normalized)
+                        else:
+                            result[..., c] = np.zeros_like(
+                                channel, dtype=np.uint8)
+                    except Exception as e:
+                        logger.warning(f"Error normalizing channel {c}: {e}")
+                        result[..., c] = np.zeros_like(channel, dtype=np.uint8)
+                image_copy = result
+            else:
+                try:
+                    # Get actual min and max for normalization
+                    min_val = np.min(image_copy)
+                    max_val = np.max(image_copy)
+                    if max_val > min_val:
+                        # Normalize to full range
+                        image_normalized = exposure.rescale_intensity(
+                            image_copy, in_range=(
+                                min_val, max_val), out_range=(0, 255)
+                        )
+                        image_copy = img_as_ubyte(image_normalized)
+                    else:
+                        image_copy = np.zeros_like(image_copy, dtype=np.uint8)
+                except Exception as e:
+                    logger.warning(f"Error in normalization: {e}")
+                    image_copy = np.zeros_like(image_copy, dtype=np.uint8)
         else:
-            image_copy = _process_multichannel_image(
-                image_copy, _normalize_channel_bit_depth, bit_depth=bit_depth
-            )
+            # Scale to the image's digitization bit depth (effective, not just dtype)
+            max_val = (1 << bit_depth) - 1  # 2^bit_depth - 1
+
+            # For multi-channel images, process each channel separately
+            # Handle RGB/RGBA images
+            if is_multichannel and image_copy.shape[-1] <= 4:
+                # Process each channel separately
+                result = np.zeros_like(image_copy, dtype=np.uint8)
+                for c in range(image_copy.shape[-1]):
+                    channel = image_copy[..., c]
+                    try:
+                        # Use skimage's rescale_intensity for more robust scaling
+                        channel_rescaled = exposure.rescale_intensity(
+                            channel, in_range=(0, max_val), out_range=(0, 255)
+                        )
+                        result[..., c] = img_as_ubyte(channel_rescaled)
+                    except Exception as e:
+                        logger.warning(f"Error normalizing channel {c}: {e}")
+                        # Fallback to simple normalization
+                        result[..., c] = np.clip(
+                            (channel / max_val * 255), 0, 255
+                        ).astype(np.uint8)
+                image_copy = result
+            else:
+                # For grayscale or other images, process the whole array
+                try:
+                    image_rescaled = exposure.rescale_intensity(
+                        image_copy, in_range=(0, max_val), out_range=(0, 255)
+                    )
+                    image_copy = img_as_ubyte(image_rescaled)
+                except Exception as e:
+                    logger.warning(f"Error in rescale_intensity: {e}")
+                    # Fallback to simple normalization
+                    image_copy = np.clip((image_copy / max_val * 255), 0, 255).astype(
+                        np.uint8
+                    )
 
     # Invert if requested (useful for some microscopy images)
     if invert:
@@ -366,7 +378,8 @@ def get_unique_id_for_image(image_file) -> str:
             filename = os.path.basename(image_file)
         else:
             filename = (
-                image_file.name if hasattr(image_file, "name") else id(image_file)
+                image_file.name if hasattr(
+                    image_file, "name") else id(image_file)
             )
         short_hash = hashlib.md5(filename.encode()).hexdigest()[:8]
         return f"img_{short_hash}"
@@ -376,243 +389,245 @@ def get_unique_id_for_image(image_file) -> str:
 
 
 def load_default_image():
-    return DEFAULT_IMAGE_PATH if os.path.exists(DEFAULT_IMAGE_PATH) else None
+    return (
+        config.DEFAULT_IMAGE_PATH if os.path.exists(
+            config.DEFAULT_IMAGE_PATH) else None
+    )
 
 
-def _get_image_settings(unique_id: str) -> dict:
-    """
-    Get image processing settings from session state.
-
-    Args:
-        unique_id: Unique identifier for the image
-
-    Returns:
-        Dictionary of processing settings
-    """
-    return {
-        "autoscale": st.session_state.get(f"autoscale_{unique_id}", True),
-        "invert": st.session_state.get(f"invert_{unique_id}", False),
-        "normalize": st.session_state.get(f"normalize_{unique_id}", False),
-        "saturated_pixels": st.session_state.get(f"saturated_pixels_{unique_id}", 0.5),
-        "equalize_histogram": st.session_state.get(
-            f"equalize_histogram_{unique_id}", False
-        ),
-    }
-
-
-def _ensure_rgb_image(image: np.ndarray) -> np.ndarray:
-    """
-    Ensure image is in RGB format.
-
-    Args:
-        image: Input image array
-
-    Returns:
-        RGB image array
-    """
-    if image.ndim == MIN_IMAGE_DIMS:
-        return np.stack([image] * RGB_CHANNELS, axis=-1)
-    elif image.shape[-1] == 1:
-        return np.repeat(image, RGB_CHANNELS, axis=-1)
-    return image
-
-
-def _load_tiff_image(file_path: str) -> tuple[np.ndarray | None, str | None]:
-    """
-    Load a TIFF image file.
-
-    Args:
-        file_path: Path to the TIFF file
-
-    Returns:
-        Tuple of (image array, file path) or (None, None) on error
-    """
-    try:
-        with tifffile.TiffFile(file_path) as tif:
-            if len(tif.pages) == 0:
-                st.error(f"TIFF file has no pages: {file_path}")
-                return None, None
-            image = tif.pages[0].asarray()
-        logger.info(
-            f"Loaded TIFF image: shape={image.shape}, dtype={image.dtype}, range={np.min(image)}-{np.max(image)}"
-        )
-        return image, file_path
-    except Exception as e:
-        logger.error(f"Failed to load TIFF: {file_path} ({e})")
-        st.error(f"Failed to load TIFF: {file_path} ({e})")
-        return None, None
-
-
-def _load_standard_image(file_path: str) -> tuple[np.ndarray | None, str | None]:
-    """
-    Load a standard image file (non-TIFF).
-
-    Args:
-        file_path: Path to the image file
-
-    Returns:
-        Tuple of (image array, file path) or (None, None) on error
-    """
-    try:
-        # Try OpenCV first
-        image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-        if image is None:
-            # If OpenCV fails, try PIL
-            logger.info(f"OpenCV failed to load image, trying PIL: {file_path}")
-            pil_image = Image.open(file_path)
-            image = np.array(pil_image)
-
-        if image is not None:
-            logger.info(
-                f"Loaded image: shape={image.shape}, dtype={image.dtype}, range={np.min(image)}-{np.max(image)}"
-            )
-            # Convert BGR to RGB if needed (OpenCV loads as BGR)
-            if len(image.shape) == RGB_CHANNELS and image.shape[2] == RGB_CHANNELS:
-                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            return image, file_path
-        else:
-            logger.error(f"Failed to load image with both OpenCV and PIL: {file_path}")
-            st.error(f"Failed to load image: {file_path}")
-            return None, None
-    except Exception as e:
-        logger.error(f"Error loading image: {file_path} ({e})")
-        st.error(f"Error loading image: {file_path} ({e})")
-        return None, None
-
-
-def _process_image(
-    image: np.ndarray, settings: dict, unique_id: str, file_path: str
-) -> tuple[np.ndarray | None, str | None]:
-    """
-    Process an image with the given settings.
-
-    Args:
-        image: Input image array
-        settings: Dictionary of processing settings
-        unique_id: Unique identifier for the image
-        file_path: Path to the image file
-
-    Returns:
-        Tuple of (processed image array, file path) or (None, None) on error
-    """
-    try:
-        # Store the effective bit depth in session state
-        bit_depth = _get_effective_bit_depth(image)
-        st.session_state[f"bit_depth_{unique_id}"] = bit_depth
-
-        # Normalize using user settings
-        image = normalize_to_uint8(
-            image,
-            autoscale=settings["autoscale"],
-            invert=settings["invert"],
-            normalize=settings["normalize"],
-            saturated_pixels=settings["saturated_pixels"],
-            equalize_histogram=settings["equalize_histogram"],
-        )
-
-        # Ensure RGB format
-        image = _ensure_rgb_image(image)
-        return image, file_path
-    except Exception as e:
-        logger.error(f"Error processing image: {e}")
-        st.error(f"Error processing image: {e}")
-        return None, None
-
-
-def _handle_uploaded_file(
-    uploaded_file, settings: dict, unique_id: str
-) -> tuple[np.ndarray | None, str | None]:
-    """
-    Handle an uploaded file object.
-
-    Args:
-        uploaded_file: Uploaded file object
-        settings: Dictionary of processing settings
-        unique_id: Unique identifier for the image
-
-    Returns:
-        Tuple of (processed image array, file path) or (None, None) on error
-    """
-    temp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=os.path.splitext(uploaded_file.name)[1]
-        ) as temp_file:
-            temp_file.write(uploaded_file.getvalue())
-            temp_path = temp_file.name
-
-        ext = os.path.splitext(temp_path)[1].lower()
-
-        # Load image based on file type
-        if ext in [".tif", ".tiff"]:
-            image, _ = _load_tiff_image(temp_path)
-        else:
-            image, _ = _load_standard_image(temp_path)
-
-        if image is not None:
-            return _process_image(image, settings, unique_id, temp_path)
-
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
-        return None, None
-    except Exception as e:
-        logger.error(f"Error processing uploaded file: {e}")
-        st.error(f"Error processing uploaded file: {e}")
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
-        return None, None
-
-
-def process_uploaded_file(uploaded_file) -> tuple[np.ndarray | None, str | None]:
-    """
-    Process an uploaded file and return the processed image.
-
-    Args:
-        uploaded_file: Path to file or uploaded file object
-
-    Returns:
-        Tuple of (processed image array, file path) or (None, None) on error
-    """
+def process_uploaded_file(uploaded_file) -> Tuple[Optional[np.ndarray], Optional[str]]:
     if uploaded_file is None:
         return None, None
-
     try:
-        return _extracted_from_process_uploaded_file_16(uploaded_file)
+        # Get image processing settings from session state if available
+        unique_id = get_unique_id_for_image(uploaded_file)
+        autoscale = st.session_state.get(f"autoscale_{unique_id}", True)
+        invert = st.session_state.get(f"invert_{unique_id}", False)
+        normalize = st.session_state.get(f"normalize_{unique_id}", False)
+        saturated_pixels = st.session_state.get(
+            f"saturated_pixels_{unique_id}", 0.5)
+        equalize_histogram = st.session_state.get(
+            f"equalize_histogram_{unique_id}", False
+        )
+
+        if isinstance(uploaded_file, str):
+            if not os.path.exists(uploaded_file):
+                st.error(f"File not found: {uploaded_file}")
+                return None, None
+            ext = os.path.splitext(uploaded_file)[1].lower()
+            if ext in [".tif", ".tiff"]:
+                try:
+                    with tifffile.TiffFile(uploaded_file) as tif:
+                        if len(tif.pages) == 0:
+                            st.error(
+                                f"TIFF file has no pages: {uploaded_file}")
+                            return None, None
+                        image = tif.pages[0].asarray()
+                    logger.info(
+                        f"Loaded TIFF image: shape={image.shape}, dtype={image.dtype}, range={np.min(image)}-{np.max(image)}"
+                    )
+                    # Store the effective bit depth in session state
+                    bit_depth = _get_effective_bit_depth(image)
+                    st.session_state[f"bit_depth_{unique_id}"] = bit_depth
+                    # Normalize using user settings
+                    try:
+                        image = normalize_to_uint8(
+                            image,
+                            autoscale=autoscale,
+                            invert=invert,
+                            normalize=normalize,
+                            saturated_pixels=saturated_pixels,
+                            equalize_histogram=equalize_histogram,
+                        )
+                        if image.ndim == 2:
+                            image = np.stack([image] * 3, axis=-1)
+                        elif image.shape[-1] == 1:
+                            image = np.repeat(image, 3, axis=-1)
+                        return image, uploaded_file
+                    except Exception as e:
+                        logger.error(f"Error normalizing TIFF image: {e}")
+                        st.error(f"Error normalizing TIFF image: {e}")
+                        return None, None
+                except Exception as e:
+                    logger.error(f"Failed to load TIFF: {uploaded_file} ({e})")
+                    st.error(f"Failed to load TIFF: {uploaded_file} ({e})")
+                    return None, None
+            else:
+                try:
+                    # Try OpenCV first
+                    image = cv2.imread(uploaded_file, cv2.IMREAD_UNCHANGED)
+                    if image is None:
+                        # If OpenCV fails, try PIL
+                        logger.info(
+                            f"OpenCV failed to load image, trying PIL: {uploaded_file}"
+                        )
+                        pil_image = Image.open(uploaded_file)
+                        image = np.array(pil_image)
+
+                    if image is not None:
+                        logger.info(
+                            f"Loaded image: shape={image.shape}, dtype={image.dtype}, range={np.min(image)}-{np.max(image)}"
+                        )
+                        # Convert BGR to RGB if needed (OpenCV loads as BGR)
+                        if len(image.shape) == 3 and image.shape[2] == 3:
+                            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                        # Determine bit depth from loaded image
+                        bit_depth = _get_effective_bit_depth(image)
+                        st.session_state[f"bit_depth_{unique_id}"] = bit_depth
+                        try:
+                            image = normalize_to_uint8(
+                                image,
+                                autoscale=autoscale,
+                                invert=invert,
+                                normalize=normalize,
+                                saturated_pixels=saturated_pixels,
+                                equalize_histogram=equalize_histogram,
+                            )
+                            if image.ndim == 2:
+                                image = np.stack([image] * 3, axis=-1)
+                            elif image.shape[-1] == 1:
+                                image = np.repeat(image, 3, axis=-1)
+                            return image, uploaded_file
+                        except Exception as e:
+                            logger.error(f"Error normalizing image: {e}")
+                            st.error(f"Error normalizing image: {e}")
+                            return None, None
+                    else:
+                        logger.error(
+                            f"Failed to load image with both OpenCV and PIL: {uploaded_file}"
+                        )
+                        st.error(f"Failed to load image: {uploaded_file}")
+                        return None, None
+                except Exception as e:
+                    logger.error(f"Error loading image: {uploaded_file} ({e})")
+                    st.error(f"Error loading image: {uploaded_file} ({e})")
+                    return None, None
+        else:
+            try:
+                with tempfile.NamedTemporaryFile(
+                    delete=False, suffix=os.path.splitext(uploaded_file.name)[1]
+                ) as temp_file:
+                    temp_file.write(uploaded_file.getvalue())
+                    temp_path = temp_file.name
+                ext = os.path.splitext(temp_path)[1].lower()
+                if ext in [".tif", ".tiff"]:
+                    try:
+                        with tifffile.TiffFile(temp_path) as tif:
+                            if len(tif.pages) == 0:
+                                st.error(
+                                    f"TIFF file has no pages: {uploaded_file.name}"
+                                )
+                                if os.path.exists(temp_path):
+                                    os.remove(temp_path)
+                                return None, None
+                            image = tif.pages[0].asarray()
+                        logger.info(
+                            f"Loaded TIFF image: shape={image.shape}, dtype={image.dtype}, range={np.min(image)}-{np.max(image)}"
+                        )
+                        bit_depth = _get_effective_bit_depth(image)
+                        st.session_state[f"bit_depth_{unique_id}"] = bit_depth
+                        try:
+                            image = normalize_to_uint8(
+                                image,
+                                autoscale=autoscale,
+                                invert=invert,
+                                normalize=normalize,
+                                saturated_pixels=saturated_pixels,
+                                equalize_histogram=equalize_histogram,
+                            )
+                            if image.ndim == 2:
+                                image = np.stack([image] * 3, axis=-1)
+                            elif image.shape[-1] == 1:
+                                image = np.repeat(image, 3, axis=-1)
+                            return image, temp_path
+                        except Exception as e:
+                            logger.error(f"Error normalizing TIFF image: {e}")
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
+                            st.error(f"Error normalizing TIFF image: {e}")
+                            return None, None
+                    except Exception as e:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                        logger.error(
+                            f"Failed to load TIFF: {uploaded_file.name} ({e})")
+                        st.error(
+                            f"Failed to load TIFF: {uploaded_file.name} ({e})")
+                        return None, None
+                else:
+                    try:
+                        # Try OpenCV first
+                        image = cv2.imread(temp_path, cv2.IMREAD_UNCHANGED)
+                        if image is None:
+                            # If OpenCV fails, try PIL
+                            logger.info(
+                                f"OpenCV failed to load image, trying PIL: {uploaded_file.name}"
+                            )
+                            pil_image = Image.open(temp_path)
+                            image = np.array(pil_image)
+
+                        if image is not None:
+                            logger.info(
+                                f"Loaded image: shape={image.shape}, dtype={image.dtype}, range={np.min(image)}-{np.max(image)}"
+                            )
+                            # Convert BGR to RGB if needed (OpenCV loads as BGR)
+                            if len(image.shape) == 3 and image.shape[2] == 3:
+                                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                            bit_depth = _get_effective_bit_depth(image)
+                            st.session_state[f"bit_depth_{unique_id}"] = bit_depth
+                            try:
+                                image = normalize_to_uint8(
+                                    image,
+                                    autoscale=autoscale,
+                                    invert=invert,
+                                    normalize=normalize,
+                                    saturated_pixels=saturated_pixels,
+                                    equalize_histogram=equalize_histogram,
+                                )
+                                if image.ndim == 2:
+                                    image = np.stack([image] * 3, axis=-1)
+                                elif image.shape[-1] == 1:
+                                    image = np.repeat(image, 3, axis=-1)
+                                return image, temp_path
+                            except Exception as e:
+                                logger.error(f"Error normalizing image: {e}")
+                                if os.path.exists(temp_path):
+                                    os.remove(temp_path)
+                                st.error(f"Error normalizing image: {e}")
+                                return None, None
+                        else:
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
+                            logger.error(
+                                f"Failed to load image with both OpenCV and PIL: {uploaded_file.name}"
+                            )
+                            st.error(
+                                f"Failed to load image: {uploaded_file.name}")
+                            return None, None
+                    except Exception as e:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                        logger.error(
+                            f"Error loading image: {uploaded_file.name} ({e})")
+                        st.error(
+                            f"Error loading image: {uploaded_file.name} ({e})")
+                        return None, None
+            except Exception as e:
+                logger.error(f"Error processing uploaded file: {e}")
+                st.error(f"Error processing uploaded file: {e}")
+                return None, None
+        return None, None
     except Exception as e:
         logger.error(f"Error processing file: {e}")
         st.error(f"Error processing file: {e}")
+        if "temp_path" in locals() and os.path.exists(temp_path):
+            os.remove(temp_path)
         return None, None
-
-
-# TODO Rename this here and in `process_uploaded_file`
-def _extracted_from_process_uploaded_file_16(uploaded_file):
-    # Get image processing settings
-    unique_id = get_unique_id_for_image(uploaded_file)
-    settings = _get_image_settings(unique_id)
-
-    if not isinstance(uploaded_file, str):
-        return _handle_uploaded_file(uploaded_file, settings, unique_id)
-
-    if not os.path.exists(uploaded_file):
-        st.error(f"File not found: {uploaded_file}")
-        return None, None
-
-    ext = os.path.splitext(uploaded_file)[1].lower()
-
-    # Load image based on file type
-    image, file_path = (
-        _load_tiff_image(uploaded_file)
-        if ext in [".tif", ".tiff"]
-        else _load_standard_image(uploaded_file)
-    )
-    if image is not None:
-        return _process_image(image, settings, unique_id, file_path)
-    return None, None
 
 
 def extract_roi_image(
-    image, roi_coordinates: tuple[int, int, int, int], rotation: int = 0
-) -> np.ndarray | None:
+    image, roi_coordinates: Tuple[int, int, int, int], rotation: int = 0
+) -> Optional[np.ndarray]:
     try:
         if roi_coordinates is None:
             return None
@@ -620,7 +635,7 @@ def extract_roi_image(
         if hasattr(image, "select_roi"):
             roi = image.select_roi(roi_coordinates)
         elif image is not None and x >= 0 and y >= 0 and width > 0 and height > 0:
-            roi = image[y : y + height, x : x + width]
+            roi = image[y: y + height, x: x + width]
         else:
             return None
 
@@ -632,6 +647,16 @@ def extract_roi_image(
     except Exception as e:
         st.error(f"Error extracting ROI: {e}")
         return None
+
+
+def save_analysis_results(results: Dict[str, Any]) -> str:
+    data = {"Parameter": [], "Value": []}
+    for key, value in results.items():
+        if isinstance(value, (int, float, str)) and not key.startswith("_"):
+            data["Parameter"].append(key)
+            data["Value"].append(value)
+    df = pd.DataFrame(data)
+    return df.to_csv(index=False)
 
 
 def initialize_session_state():
@@ -709,7 +734,7 @@ def find_best_two_line_pairs(dark_bar_starts):
         for i in range(len(dark_bar_starts) - 1)
     ]
     widths = [end - start for start, end in pairs]
-    if len(widths) < MIN_ARRAY_LENGTH:
+    if len(widths) < 2:
         return [], 0.0  # Not enough pairs
     # Find the two widths that are closest to each other
     min_diff = float("inf")
@@ -722,7 +747,7 @@ def find_best_two_line_pairs(dark_bar_starts):
                 best_indices = (i, j)
     # Get the best two pairs and their average width
     best_pairs = [pairs[best_indices[0]], pairs[best_indices[1]]]
-    avg_width = (widths[best_indices[0]] + widths[best_indices[1]]) / MIN_ARRAY_SIZE
+    avg_width = (widths[best_indices[0]] + widths[best_indices[1]]) / 2
     return best_pairs, avg_width
 
 
@@ -738,6 +763,28 @@ class USAFTarget:
 
     def line_pair_width_microns(self, group: int, element: int) -> float:
         return 1000.0 / self.lp_per_mm(group, element)
+
+    def resolution_to_group_element(
+        self, resolution_um: float
+    ) -> Dict[str, Union[int, float]]:
+        if resolution_um <= 0:
+            return {"group": 0, "element": 1, "exact_group": 0, "exact_element": 1}
+        lp_per_mm = 1000.0 / resolution_um
+        log2_result = math.log2(lp_per_mm / self.base_lp_per_mm)
+        exact_group = int(log2_result)
+        exact_element = round(((log2_result - exact_group) * 6) + 1)
+        if exact_element > 6:
+            exact_group += 1
+            exact_element = 1
+        elif exact_element < 1:
+            exact_group -= 1
+            exact_element = 6
+        return {
+            "group": exact_group,
+            "element": exact_element,
+            "exact_group": log2_result,
+            "exact_element": ((log2_result - exact_group) * 6) + 1,
+        }
 
 
 def detect_significant_transitions(profile):
@@ -768,7 +815,7 @@ def extract_alternating_patterns(transitions, transition_types):
     Returns:
         tuple of (pattern_transitions, pattern_types)
     """
-    if len(transitions) <= MIN_LINE_PAIRS:
+    if len(transitions) <= 2:
         return transitions, transition_types
 
     # Try to identify proper line pair transitions by looking for alternating patterns
@@ -818,22 +865,24 @@ def limit_transitions_to_strongest(
     # Filter out transitions below the minimum strength
     filtered = [
         (t, typ)
-        for t, typ in zip(transitions, transition_types, strict=False)
+        for t, typ in zip(transitions, transition_types)
         if abs(derivative[t]) >= min_strength
     ]
     if not filtered:
         return [], []
-    filtered_transitions, filtered_types = zip(*filtered, strict=False)
+    filtered_transitions, filtered_types = zip(*filtered)
     filtered_transitions = list(filtered_transitions)
     filtered_types = list(filtered_types)
     if len(filtered_transitions) <= max_transitions:
         return filtered_transitions, filtered_types
     # Sort transitions by derivative magnitude
-    transition_strengths = np.abs([derivative[t] for t in filtered_transitions])
+    transition_strengths = np.abs([derivative[t]
+                                  for t in filtered_transitions])
     strongest_indices = np.argsort(transition_strengths)[-max_transitions:]
     # Resort by position to maintain order
     strongest_indices = np.sort(strongest_indices)
-    strongest_transitions = [filtered_transitions[i] for i in strongest_indices]
+    strongest_transitions = [filtered_transitions[i]
+                             for i in strongest_indices]
     strongest_types = [filtered_types[i] for i in strongest_indices]
     return strongest_transitions, strongest_types
 
@@ -845,7 +894,8 @@ def find_line_pair_boundaries_derivative(profile):
         (dark_bar_starts, derivative, transition_types)
     Only -1 (light-to-dark) transitions are returned as boundaries.
     """
-    all_transitions, all_types, derivative = detect_significant_transitions(profile)
+    all_transitions, all_types, derivative = detect_significant_transitions(
+        profile)
     pattern_transitions, pattern_types = extract_alternating_patterns(
         all_transitions, all_types
     )
@@ -856,9 +906,8 @@ def find_line_pair_boundaries_derivative(profile):
         pattern_transitions, pattern_types, derivative, min_strength=min_strength
     )
     # Only keep -1 transitions (light-to-dark, i.e., dark bar starts)
-    dark_bar_starts = [
-        t for t, typ in zip(final_transitions, final_types, strict=False) if typ == -1
-    ]
+    dark_bar_starts = [t for t, typ in zip(
+        final_transitions, final_types) if typ == -1]
     dark_bar_types = [-1] * len(dark_bar_starts)
     return dark_bar_starts, derivative, dark_bar_types
 
@@ -875,8 +924,8 @@ def find_line_pair_boundaries_windowed(profile, window=5):
     edges = []
     transition_types = []
     for i in range(window, len(profile) - window):
-        left = np.mean(profile[i - window : i])
-        right = np.mean(profile[i : i + window])
+        left = np.mean(profile[i - window: i])
+        right = np.mean(profile[i: i + window])
         diff = right - left
         pseudo_derivative[i] = diff
         if i > window and np.sign(pseudo_derivative[i - 1]) != np.sign(diff):
@@ -886,15 +935,15 @@ def find_line_pair_boundaries_windowed(profile, window=5):
         edges, transition_types
     )
     # Adaptive threshold: 20% of max pseudo_derivative
-    max_deriv = np.max(np.abs(pseudo_derivative)) if len(pseudo_derivative) > 0 else 0
+    max_deriv = np.max(np.abs(pseudo_derivative)) if len(
+        pseudo_derivative) > 0 else 0
     min_strength = 0.2 * max_deriv if max_deriv > 0 else 0
     final_transitions, final_types = limit_transitions_to_strongest(
         pattern_transitions, pattern_types, pseudo_derivative, min_strength=min_strength
     )
     # Only keep -1 transitions (light-to-dark, i.e., dark bar starts)
-    dark_bar_starts = [
-        t for t, typ in zip(final_transitions, final_types, strict=False) if typ == -1
-    ]
+    dark_bar_starts = [t for t, typ in zip(
+        final_transitions, final_types) if typ == -1]
     dark_bar_types = [-1] * len(dark_bar_starts)
     return dark_bar_starts, pseudo_derivative, dark_bar_types
 
@@ -920,11 +969,13 @@ def find_line_pair_boundaries_threshold(profile, threshold):
     # Create a binary mask where True is above threshold
     above_threshold = profile_array > threshold
 
-    dark_bar_starts = [
-        i
-        for i in range(1, len(above_threshold))
-        if above_threshold[i - 1] is True and above_threshold[i] is False
-    ]
+    # Find light-to-dark transitions directly
+    dark_bar_starts = []
+    for i in range(1, len(above_threshold)):
+        # Look for transitions from above threshold to below threshold (light-to-dark)
+        if above_threshold[i - 1] == True and above_threshold[i] == False:
+            dark_bar_starts.append(i)
+
     # Create corresponding transition types (all -1 for light-to-dark)
     transition_types = [-1] * len(dark_bar_starts)
 
@@ -935,8 +986,9 @@ def find_line_pair_boundaries_threshold(profile, threshold):
     logger.debug(
         f"Found {len(dark_bar_starts)} dark bar starts (light-to-dark transitions)"
     )
-    if dark_bar_starts:
-        logger.debug(f"Dark bar starts at positions: {dark_bar_starts[:10]}...")
+    if len(dark_bar_starts) > 0:
+        logger.debug(
+            f"Dark bar starts at positions: {dark_bar_starts[:10]}...")
     else:
         logger.warning(f"No dark bar starts found with threshold {threshold}!")
 
@@ -984,7 +1036,8 @@ class RoiManager:
             self.is_valid = False
             self.roi_tuple = None
         else:
-            self.roi_tuple = (int(roi_x), int(roi_y), int(roi_width), int(roi_height))
+            self.roi_tuple = (int(roi_x), int(roi_y),
+                              int(roi_width), int(roi_height))
             self.is_valid = True
 
     def validate_against_image(self, image):
@@ -1056,12 +1109,44 @@ class RoiManager:
                 and roi_width > 0
                 and roi_height > 0
             ):
-                return image[roi_y : roi_y + roi_height, roi_x : roi_x + roi_width]
+                return image[roi_y: roi_y + roi_height, roi_x: roi_x + roi_width]
 
             return None
         except Exception as e:
             logger.error(f"Error extracting ROI: {e}")
             return None
+
+    def draw_on_image(self, pil_img, color="#00FF00", width=3):
+        """
+        Draw the ROI on a PIL image
+
+        Args:
+            pil_img: PIL.Image to draw on
+            color: Color to use for the ROI outline
+            width: Width of the outline
+
+        Returns:
+            PIL.Image: Image with ROI drawn
+        """
+        if self.coordinates is None:
+            return pil_img
+
+        draw = ImageDraw.Draw(pil_img)
+        p1, p2 = self.coordinates
+        coords = (
+            min(p1[0], p2[0]),
+            min(p1[1], p2[1]),
+            max(p1[0], p2[0]),
+            max(p1[1], p2[1]),
+        )
+
+        draw.rectangle(coords, outline=color, width=width)
+        return pil_img
+
+    @property
+    def as_tuple(self):
+        """Get ROI as (x, y, width, height) tuple"""
+        return self.roi_tuple
 
 
 class ProfileVisualizer:
@@ -1076,13 +1161,14 @@ class ProfileVisualizer:
 
         # Define colors for different elements
         self.light_to_dark_color = "#FF4500"  # Orange-red
+        self.dark_to_light_color = "#00BFFF"  # Deep sky blue
         self.annotation_color = "#FFFF99"  # Yellow
         self.profile_color = "#2c3e50"  # Dark blue-gray
         self.individual_profile_color = "#6b88b6"  # Light blue
 
         # Shadow effect for text
         self.shadow_effect = [
-            patheffects.withSimplePatchShadow(
+            PathEffects.withSimplePatchShadow(
                 offset=(1.0, -1.0), shadow_rgbFace="black", alpha=0.6
             )
         ]
@@ -1101,59 +1187,10 @@ class ProfileVisualizer:
             }
         )
 
-    def _format_group_element_title(self, group: int, element: int) -> str:
-        """Format the group and element title with LaTeX math formatting."""
-        group_str = f"$\\mathbf{{{group}}}$"
-        element_str = f"$\\mathbf{{{element}}}$"
-        return f"USAF Target: Group {group_str}, Element {element_str}"
-
-    def _format_line_pairs_info(
-        self, lp_per_mm: float | None, avg_line_pair_width: float | None
-    ) -> str:
-        """Format line pairs per mm and average line pair width information."""
-        if not lp_per_mm and not avg_line_pair_width:
-            return ""
-
-        lp_per_mm_str = (
-            f"Line Pairs/mm: $\\mathbf{{{lp_per_mm:.2f}}}$" if lp_per_mm else ""
-        )
-        avg_width_str = (
-            f"Avg. LP Width: $\\mathbf{{{avg_line_pair_width:.2f}}}$ px"
-            if avg_line_pair_width and avg_line_pair_width > 0
-            else ""
-        )
-
-        if lp_per_mm_str and avg_width_str:
-            return f"{lp_per_mm_str}  |  {avg_width_str}"
-        return lp_per_mm_str or avg_width_str
-
-    def _format_pixel_size_info(
-        self,
-        avg_line_pair_width: float | None,
-        lp_width_um: float | None,
-        magnification: float | None,
-    ) -> str:
-        """Format pixel size and magnification information."""
-        if not (avg_line_pair_width and avg_line_pair_width > 0 and lp_width_um):
-            return ""
-
-        pixel_size = lp_width_um / avg_line_pair_width
-        pixel_size_str = f"Pixel Size: $\\mathbf{{{pixel_size:.3f}}}$ µm/pixel"
-
-        mag_str = (
-            f"Magnification: $\\mathbf{{{magnification:.1f}\\times}}$"
-            if magnification
-            else ""
-        )
-
-        if pixel_size_str and mag_str:
-            return f"{pixel_size_str}  |  {mag_str}"
-        return pixel_size_str or mag_str
-
     def create_figure(self, figsize=(8, 8), dpi=150):
         """Create a square matplotlib figure with properly configured layout"""
         fig = plt.figure(figsize=figsize, dpi=dpi, facecolor="white")
-        gs = fig.add_gridspec(MIN_ARRAY_DIMS, 1, height_ratios=[1, 1], hspace=0.05)
+        gs = fig.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.05)
 
         # Set explicit figure margins to avoid tight_layout issues
         fig.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.05)
@@ -1196,36 +1233,66 @@ class ProfileVisualizer:
         magnification=None,
         lp_per_mm=None,
     ):
-        """Plot the ROI image with title and annotations."""
-        # Display the image
+        """Plot the ROI image"""
         ax.imshow(image, cmap="gray", aspect="auto", interpolation="bicubic")
 
-        # Return early if no group/element info to display
-        if group is None or element is None:
-            return
+        if group is not None and element is not None:
+            title_lines = []
+            group_str = f"$\\mathbf{{{group}}}$"
+            element_str = f"$\\mathbf{{{element}}}$"
+            title_lines.append(
+                f"USAF Target: Group {group_str}, Element {element_str}")
 
-        # Build title lines
-        title_lines = [self._format_group_element_title(group, element)]
+            # Combine Line Pairs per mm and Avg Line Pair Width on one line
+            lp_per_mm_str = ""
+            avg_width_str = ""
 
-        # Add line pairs info
-        if line_pairs_info := self._format_line_pairs_info(
-            lp_per_mm, avg_line_pair_width
-        ):
-            title_lines.append(line_pairs_info)
+            if lp_per_mm is not None:
+                lp_per_mm_str = f"Line Pairs/mm: $\\mathbf{{{lp_per_mm:.2f}}}$"
 
-        # Add pixel size and magnification info
-        if pixel_size_info := self._format_pixel_size_info(
-            avg_line_pair_width, lp_width_um, magnification
-        ):
-            title_lines.append(pixel_size_info)
+            if avg_line_pair_width is not None and avg_line_pair_width > 0:
+                avg_width_str = (
+                    f"Avg. LP Width: $\\mathbf{{{avg_line_pair_width:.2f}}}$ px"
+                )
 
-        # Set the title
-        ax.set_title(
-            "\n".join(title_lines),
-            fontweight="normal",
-            pad=15,
-            fontsize=20,
-        )
+            # Add combined line if either value is available
+            if lp_per_mm_str or avg_width_str:
+                combined_str = ""
+                if lp_per_mm_str and avg_width_str:
+                    combined_str = f"{lp_per_mm_str}  |  {avg_width_str}"
+                else:
+                    combined_str = lp_per_mm_str or avg_width_str
+                title_lines.append(combined_str)
+
+            # Combine Pixel Size and Magnification on one line
+            if (
+                avg_line_pair_width is not None
+                and avg_line_pair_width > 0
+                and lp_width_um is not None
+            ):
+                pixel_size = lp_width_um / avg_line_pair_width
+                pixel_size_str = f"Pixel Size: $\\mathbf{{{pixel_size:.3f}}}$ µm/pixel"
+
+                mag_str = ""
+                if magnification is not None:
+                    mag_str = f"Magnification: $\\mathbf{{{magnification:.1f}\\times}}$"
+
+                # Add combined line if both values are available
+                if pixel_size_str and mag_str:
+                    title_lines.append(f"{pixel_size_str}  |  {mag_str}")
+                else:
+                    if pixel_size_str:
+                        title_lines.append(pixel_size_str)
+                    if mag_str:
+                        title_lines.append(mag_str)
+
+            title_text = "\n".join(title_lines)
+            ax.set_title(
+                title_text,
+                fontweight="normal",
+                pad=15,
+                fontsize=20,
+            )
 
     def plot_profiles(
         self,
@@ -1282,7 +1349,7 @@ class ProfileVisualizer:
                 linewidth=1.5,
                 zorder=3,
                 label="Threshold",
-            )
+            )  # Increased linewidth
 
         # Increase font size for axis labels and ticks
         # Increased tick font size
@@ -1292,6 +1359,42 @@ class ProfileVisualizer:
         # Increased label font size
         ax.set_ylabel("Intensity (a.u.)", fontsize=12)
 
+    def draw_transition_lines(self, ax_profile, ax_img, boundaries, transition_types):
+        """Draw vertical lines for each detected transition in both plots"""
+        line_style = "-"
+        for i, (boundary, trans_type) in enumerate(zip(boundaries, transition_types)):
+            if trans_type == -1:  # Light-to-dark
+                line_color = self.light_to_dark_color
+                label = "Light → Dark" if i == 0 else ""
+            else:  # Dark-to-light
+                line_color = self.dark_to_light_color
+                label = (
+                    "Dark → Light"
+                    if i == 0 or (i == 1 and transition_types[0] != 1)
+                    else ""
+                )
+
+            # Draw on profile plot
+            ax_profile.axvline(
+                x=boundary,
+                color=line_color,
+                linestyle=line_style,
+                alpha=0.7,
+                linewidth=1.5,
+                zorder=4,
+                label=label,
+            )
+
+            # Draw on image
+            ax_img.axvline(
+                x=boundary,
+                color=line_color,
+                linestyle="--",
+                alpha=0.6,
+                linewidth=0.8,
+                zorder=3,
+            )
+
     def find_line_pairs(self, boundaries, roi_img):
         """
         Find and return only the two best-matching line pairs for annotation.
@@ -1300,7 +1403,7 @@ class ProfileVisualizer:
         line_pairs = []
         for j, (start_pos, end_pos) in enumerate(best_pairs):
             width_px = end_pos - start_pos
-            if width_px >= MIN_PAIRS:
+            if width_px >= 5:
                 line_pairs.append((start_pos, end_pos, width_px, j))
         return line_pairs
 
@@ -1313,7 +1416,7 @@ class ProfileVisualizer:
             "",
             xy=(x_start, y_pos),
             xytext=(x_end, y_pos),
-            arrowprops={"arrowstyle": "-", "color": color, "linewidth": line_width},
+            arrowprops=dict(arrowstyle="-", color=color, linewidth=line_width),
         )
 
         # Draw tick marks on ends
@@ -1321,13 +1424,13 @@ class ProfileVisualizer:
             "",
             xy=(x_start, y_pos),
             xytext=(x_start, y_pos + tick_size),
-            arrowprops={"arrowstyle": "-", "color": color, "linewidth": line_width},
+            arrowprops=dict(arrowstyle="-", color=color, linewidth=line_width),
         )
         ax.annotate(
             "",
             xy=(x_end, y_pos),
             xytext=(x_end, y_pos + tick_size),
-            arrowprops={"arrowstyle": "-", "color": color, "linewidth": line_width},
+            arrowprops=dict(arrowstyle="-", color=color, linewidth=line_width),
         )
 
     def annotate_line_pairs(self, ax, line_pairs, roi_img):
@@ -1390,11 +1493,11 @@ class ProfileVisualizer:
         if group is not None and element is not None and lp_width_um is not None:
             lp_per_mm_str = f"{lp_per_mm:.2f} lp/mm" if lp_per_mm is not None else ""
 
-            return f"""
+            caption = f"""
             <div style='text-align:center; font-family: "Times New Roman", Times, serif;'>
                 <p style='margin-bottom:0.3rem; font-size:1.25rem;'><b>Figure: Intensity Profile Analysis of USAF Target</b></p>
                 <p style='margin-top:0; font-size:1.0rem; color:#333;'>
-                    Group {group}, Element {element} with theoretical line pair width of {lp_width_um:.2f} µm
+                    Group {group}, Element {element} with theoretical line pair width of {lp_width_um:.2f} µm 
                     {f"({lp_per_mm_str})" if lp_per_mm_str else ""}.<br>
                     <b>Max Intensity Profile</b> with <b>Edge Detection Method:</b> <span style='color:#0074D9'>{method_str}</span><br>
                     Each line pair consists of one complete dark bar and one complete light bar.<br>
@@ -1403,7 +1506,7 @@ class ProfileVisualizer:
             </div>
             """
         else:
-            return f"""
+            caption = f"""
             <div style='text-align:center; font-family: "Times New Roman", Times, serif;'>
                 <p style='margin-bottom:0.3rem; font-size:1.25rem;'><b>Figure: Aligned Visual Analysis</b></p>
                 <p style='margin-top:0; font-size:1.0rem; color:#333;'>
@@ -1413,6 +1516,7 @@ class ProfileVisualizer:
                 </p>
             </div>
             """
+        return caption
 
     def visualize_profile(
         self,
@@ -1526,6 +1630,54 @@ class ProfileVisualizer:
         # Return the figure - the caller is responsible for displaying it using st.pyplot(fig)
         return fig
 
+    def display_in_streamlit(
+        self, results, roi_img, group=None, element=None, magnification=None
+    ):
+        """
+        Create visualization and display it in Streamlit
+        Args:
+            results: Analysis results dictionary
+            roi_img: The ROI image to display
+            group: USAF target group
+            element: USAF target element
+            magnification: User-provided magnification value
+        """
+        # Get theoretical line pair width if possible
+        lp_width_um = None
+        # Get Line Pairs per mm from results
+        lp_per_mm = results.get("lp_per_mm", None)
+
+        if (
+            group is not None
+            and element is not None
+            and "usaf_target" in st.session_state
+        ):
+            lp_width_um = st.session_state.usaf_target.line_pair_width_microns(
+                group, element
+            )
+
+        edge_method = results.get("edge_method", "original")
+
+        # Create visualization
+        fig = self.visualize_profile(
+            results, roi_img, group, element, lp_width_um, magnification
+        )
+
+        if fig is not None:
+            # Display figure
+            st.pyplot(fig)
+            # Display caption
+            caption = self.create_caption(
+                group,
+                element,
+                lp_width_um,
+                edge_method=edge_method,
+                lp_per_mm=lp_per_mm,
+            )
+            st.markdown(caption, unsafe_allow_html=True)
+            return True
+        return False
+
 
 class ImageProcessor:
     def __init__(self, usaf_target: USAFTarget = None):
@@ -1543,6 +1695,7 @@ class ImageProcessor:
         self.transition_types = None
         self.derivative = None
         self.line_pair_widths = []
+        self.line_pair_positions = []
         self.dark_regions = []
         self.light_regions = []
         self.contrast = 0.0
@@ -1553,8 +1706,9 @@ class ImageProcessor:
             "saturated_pixels": 0.5,
             "equalize_histogram": True,  # Changed default to True
         }
-        # Store ROI rotation (0, 1, 2, or 3 for 0°, 90°, 180°, 270°)
-        self.roi_rotation = 0
+        self.roi_rotation = (
+            0  # Store ROI rotation (0, 1, 2, or 3 for 0°, 90°, 180°, 270°)
+        )
 
     def load_image(self, image_path: str) -> bool:
         try:
@@ -1567,14 +1721,17 @@ class ImageProcessor:
                     try:
                         with tifffile.TiffFile(image_path) as tif:
                             if len(tif.pages) == 0:
-                                logger.error(f"TIFF file has no pages: {image_path}")
+                                logger.error(
+                                    f"TIFF file has no pages: {image_path}")
                                 return False
                             self.original_image = tif.pages[0].asarray()
                     except Exception as e:
-                        logger.error(f"Failed to load TIFF: {image_path} ({e})")
+                        logger.error(
+                            f"Failed to load TIFF: {image_path} ({e})")
                         return False
                 else:
-                    self.original_image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+                    self.original_image = cv2.imread(
+                        image_path, cv2.IMREAD_UNCHANGED)
                     if self.original_image is None:
                         # If OpenCV fails, try PIL
                         logger.info(
@@ -1589,15 +1746,15 @@ class ImageProcessor:
 
                 # Convert BGR to RGB if needed (OpenCV loads as BGR)
                 if (
-                    len(self.original_image.shape) == RGB_CHANNELS
-                    and self.original_image.shape[2] == RGB_CHANNELS
+                    len(self.original_image.shape) == 3
+                    and self.original_image.shape[2] == 3
                 ):
                     self.original_image = cv2.cvtColor(
                         self.original_image, cv2.COLOR_BGR2RGB
                     )
 
                 # Create grayscale version of the original image
-                if len(self.original_image.shape) > MIN_IMAGE_DIMS:
+                if len(self.original_image.shape) > 2:
                     self.original_grayscale = cv2.cvtColor(
                         self.original_image, cv2.COLOR_RGB2GRAY
                     )
@@ -1629,7 +1786,7 @@ class ImageProcessor:
             )
 
             # Create grayscale version of the processed image
-            if len(self.image.shape) > MIN_IMAGE_DIMS:
+            if len(self.image.shape) > 2:
                 self.grayscale = cv2.cvtColor(self.image, cv2.COLOR_RGB2GRAY)
             else:
                 self.grayscale = self.image
@@ -1658,7 +1815,7 @@ class ImageProcessor:
 
         return self.apply_processing()
 
-    def set_roi(self, roi_coordinates: tuple[int, int, int, int]) -> bool:
+    def set_roi(self, roi_coordinates: Tuple[int, int, int, int]) -> bool:
         """
         Set and validate ROI coordinates
 
@@ -1668,10 +1825,7 @@ class ImageProcessor:
         Returns:
             bool: True if ROI is valid, False otherwise
         """
-        if (
-            not isinstance(roi_coordinates, tuple)
-            or len(roi_coordinates) != ROI_COORDS_LENGTH
-        ):
+        if not isinstance(roi_coordinates, tuple) or len(roi_coordinates) != 4:
             logger.error(f"Invalid ROI coordinates format: {roi_coordinates}")
             return False
 
@@ -1681,7 +1835,8 @@ class ImageProcessor:
 
         # Use ROI manager to set and validate coordinates
         valid = self.roi_manager.set_coordinates(point1, point2)
-        valid = valid and self.roi_manager.validate_against_image(self.grayscale)
+        valid = valid and self.roi_manager.validate_against_image(
+            self.grayscale)
 
         if valid:
             self.select_roi()
@@ -1697,7 +1852,7 @@ class ImageProcessor:
         """
         self.roi_rotation = rotation_count % 4
 
-    def select_roi(self) -> np.ndarray | None:
+    def select_roi(self) -> Optional[np.ndarray]:
         """
         Extract the ROI based on the current roi_manager settings
 
@@ -1709,12 +1864,14 @@ class ImageProcessor:
 
         try:
             # Extract ROI from both original and processed grayscale images
-            self.original_roi = self.roi_manager.extract_roi(self.original_grayscale)
+            self.original_roi = self.roi_manager.extract_roi(
+                self.original_grayscale)
             self.roi = self.roi_manager.extract_roi(self.grayscale)
 
             # Apply rotation if needed
             if self.roi_rotation > 0:
-                self.original_roi = rotate_image(self.original_roi, self.roi_rotation)
+                self.original_roi = rotate_image(
+                    self.original_roi, self.roi_rotation)
                 self.roi = rotate_image(self.roi, self.roi_rotation)
 
             return self.roi
@@ -1722,19 +1879,23 @@ class ImageProcessor:
             logger.error(f"Error selecting ROI: {e}")
             return None
 
-    def get_line_profile(self, use_max=False) -> np.ndarray | None:
+    def get_line_profile(self, use_max=False) -> Optional[np.ndarray]:
         if self.roi is None:
             return None
         try:
             use_roi = self.roi
             self.individual_profiles = use_roi.copy()
-            self.profile = (
-                np.max(use_roi, axis=0) if use_max else np.mean(use_roi, axis=0)
-            )
+            if use_max:
+                self.profile = np.max(use_roi, axis=0)
+            else:
+                self.profile = np.mean(use_roi, axis=0)
             return self.profile
         except Exception as e:
             logger.error(f"Error getting line profile: {e}")
             return None
+
+    def get_individual_profiles(self) -> Optional[np.ndarray]:
+        return self.individual_profiles
 
     def detect_edges(self, edge_method="original"):
         if self.profile is None:
@@ -1749,6 +1910,84 @@ class ImageProcessor:
                 find_line_pair_boundaries_derivative(self.profile)
             )
         return len(self.boundaries) > 0
+
+    def identify_line_pairs(self):
+        """
+        Identify line pairs from the detected edges.
+
+        Returns:
+            int: Number of line pairs identified
+        """
+        if self.boundaries is None or self.transition_types is None:
+            return 0
+
+        self.line_pair_widths = []
+        self.line_pair_positions = []
+
+        # Find all light-to-dark transitions (red lines)
+        red_indices = [
+            i for i, trans_type in enumerate(self.transition_types) if trans_type == -1
+        ]
+
+        # For each pair of consecutive red lines, check if there's a blue line in between
+        for j in range(len(red_indices) - 1):
+            start_idx = red_indices[j]
+            end_idx = red_indices[j + 1]
+            start_pos = self.boundaries[start_idx]
+            end_pos = self.boundaries[end_idx]
+
+            has_blue_between = any(
+                i < len(
+                    self.transition_types) and self.transition_types[i] == 1
+                for i in range(start_idx + 1, end_idx)
+            )
+            if has_blue_between:
+                # This is a complete line pair: red-blue-red
+                width = end_pos - start_pos
+                if width > 0:
+                    self.line_pair_widths.append(width)
+                    self.line_pair_positions.append((start_pos, end_pos))
+
+        return len(self.line_pair_widths)
+
+    def estimate_line_pairs_from_bars(self):
+        """
+        Estimate line pairs based on dark bar widths if direct line pair detection fails.
+
+        Returns:
+            int: Number of estimated line pairs
+        """
+        if len(self.line_pair_widths) > 0 or len(self.boundaries) < 4:
+            return len(self.line_pair_widths)
+
+        # Look for each dark bar (from light-to-dark to dark-to-light)
+        dark_bar_widths = []
+        dark_bar_positions = []
+
+        for i in range(len(self.boundaries) - 1):
+            if (
+                i + 1 < len(self.transition_types)
+                and self.transition_types[i] == -1
+                and self.transition_types[i + 1] == 1
+            ):
+                # This is a dark bar from light-to-dark (red) to dark-to-light (blue)
+                start_pos = self.boundaries[i]
+                end_pos = self.boundaries[i + 1]
+                dark_width = end_pos - start_pos
+
+                if dark_width > 0:
+                    dark_bar_widths.append(dark_width)
+                    dark_bar_positions.append((start_pos, end_pos))
+
+        # Estimate line pair widths (each line pair = dark bar + light bar of equal width)
+        if dark_bar_widths:
+            avg_dark_width = np.mean(dark_bar_widths)
+            for start_pos, _ in dark_bar_positions:
+                # Line pair width = 2 * dark bar width (dark + light bar)
+                estimated_lp_width = avg_dark_width * 2
+                self.line_pair_widths.append(estimated_lp_width)
+
+        return len(self.line_pair_widths)
 
     def calculate_contrast(self):
         """
@@ -1811,7 +2050,7 @@ class ImageProcessor:
 
         return self.contrast
 
-    def analyze_profile(self, group: int, element: int) -> dict:
+    def analyze_profile(self, group: int, element: int) -> Dict:
         """
         Analyze the current profile for the specified USAF target group and element.
 
@@ -1830,13 +2069,19 @@ class ImageProcessor:
         # Step 1: Detect edges in the profile if not already detected
         # (skip if boundaries are already set, e.g., by threshold detection)
         if self.boundaries is None or len(self.boundaries) == 0:
-            logger.debug("No boundaries detected yet, using detect_edges")
-            self.detect_edges()
+            if self.boundaries is None or len(self.boundaries) == 0:
+                logger.debug("No boundaries detected yet, using detect_edges")
+                self.detect_edges()
+            else:
+                logger.debug(
+                    f"Using pre-existing {len(self.boundaries)} boundaries")
+
             # Step 2: Use only the best two line pairs
             self.line_pair_widths = []
-
-        if self.boundaries is not None and len(self.boundaries) >= MIN_BOUNDARIES:
+        self.line_pair_positions = []
+        if self.boundaries is not None and len(self.boundaries) >= 3:
             best_pairs, avg_width = find_best_two_line_pairs(self.boundaries)
+            self.line_pair_positions = best_pairs
             self.line_pair_widths = [end - start for start, end in best_pairs]
             self.avg_line_pair_width = avg_width
             logger.debug(
@@ -1888,15 +2133,15 @@ class ImageProcessor:
     def process_and_analyze(
         self,
         image_path: str,
-        roi: tuple[int, int, int, int],
+        roi: Tuple[int, int, int, int],
         group: int,
         element: int,
         use_max: bool = True,
         edge_method: str = "original",
-        threshold: float | None = None,
+        threshold: float = None,
         roi_rotation: int = 0,
         **processing_params,
-    ) -> dict:
+    ) -> Dict:
         """
         Complete pipeline: load image, select ROI, and analyze profile
         Args:
@@ -1956,7 +2201,8 @@ class ImageProcessor:
             results["edge_method"] = edge_method
         else:
             # Use the specified edge method
-            results = self.analyze_profile_with_edge_method(edge_method, group, element)
+            results = self.analyze_profile_with_edge_method(
+                edge_method, group, element)
 
         # Add threshold information to results
         results["threshold"] = threshold if threshold is not None else 0
@@ -1988,10 +2234,83 @@ class ImageProcessor:
         return result
 
 
+# Keep ProfileAnalyzer for backward compatibility
+class ProfileAnalyzer:
+    def __init__(self, usaf_target: USAFTarget = None):
+        self.usaf_target = usaf_target or USAFTarget()
+
+    def analyze_profile(self, profile: np.ndarray, group: int, element: int) -> Dict:
+        # Create a temporary ImageProcessor to reuse the analysis code
+        img_proc = ImageProcessor(self.usaf_target)
+        # Set the profile directly
+        img_proc.profile = profile
+        # Run the analysis
+        return img_proc.analyze_profile(group, element)
+
+
 # --- Streamlit UI Functions ---
 
 
-def display_roi_info(idx: int, image=None) -> tuple[int, int, int, int] | None:
+def group_element_selectors(idx, default_group=None, default_element=None):
+    if default_group is None:
+        default_group = config.DEFAULT_GROUP
+    if default_element is None:
+        default_element = config.DEFAULT_ELEMENT
+    keys = get_image_session_keys(idx)
+    if keys["group"] not in st.session_state:
+        st.session_state[keys["group"]] = default_group
+    if keys["element"] not in st.session_state:
+        st.session_state[keys["element"]] = default_element
+    if keys["coordinates"] not in st.session_state:
+        st.session_state[keys["coordinates"]] = None
+    col_g, col_e = st.columns(2)
+    with col_g:
+        group = st.number_input(
+            "Group",
+            value=st.session_state[keys["group"]],
+            min_value=-2,
+            max_value=9,
+            key=keys["group"],
+        )
+    with col_e:
+        element = st.number_input(
+            "Element",
+            value=st.session_state[keys["element"]],
+            min_value=1,
+            max_value=6,
+            key=keys["element"],
+        )
+    return group, element
+
+
+def display_metrics_row(results):
+    group = results.get("group")
+    element = results.get("element")
+    lp_width_um = (
+        st.session_state.usaf_target.line_pair_width_microns(group, element)
+        if group is not None and element is not None
+        else None
+    )
+    metric_cols = st.columns(4)
+    metrics = [
+        ("Line Pairs per mm", f"{results['lp_per_mm']:.2f}"),
+        (
+            "Line Pair Width (μm)",
+            f"{lp_width_um:.2f}" if lp_width_um is not None else "-",
+        ),
+        ("Contrast",
+         f"{results['contrast']:.2f}" if "contrast" in results else "-"),
+        ("Line Pairs Detected", f"{results['num_line_pairs']}"),
+    ]
+    for i, (label, value) in enumerate(metrics):
+        with metric_cols[i]:
+            st.markdown(
+                f"<div style='font-size:1.1em'><b>{label}:</b> {value}</div>",
+                unsafe_allow_html=True,
+            )
+
+
+def display_roi_info(idx: int, image=None) -> Optional[Tuple[int, int, int, int]]:
     keys = get_image_session_keys(idx)
     coordinates_key = keys["coordinates"]
     roi_valid_key = keys["roi_valid"]
@@ -2103,7 +2422,9 @@ def display_welcome_screen():
     col1, col2 = st.columns([1, 2])
     with col1:
         st.image(
-            WELCOME_IMAGE_URL, caption=WELCOME_IMAGE_CAPTION, use_container_width=True
+            config.WELCOME_IMAGE_URL,
+            caption=config.WELCOME_IMAGE_CAPTION,
+            use_container_width=True,
         )
     with col2:
         st.subheader("USAF 1951 Target Format")
@@ -2118,7 +2439,8 @@ def display_welcome_screen():
 def display_analysis_details(results):
     group = results.get("group")
     element = results.get("element")
-    lp_width_um = st.session_state.usaf_target.line_pair_width_microns(group, element)
+    lp_width_um = st.session_state.usaf_target.line_pair_width_microns(
+        group, element)
     lp_per_mm = results.get("lp_per_mm")
     avg_measured_lp_width_px = results.get("avg_line_pair_width", 0.0)
     st.markdown(
@@ -2151,12 +2473,49 @@ def display_analysis_details(results):
         )
 
 
+def analyze_image_with_analyzer(image_path, roi, group, element, analyzer=None):
+    """
+    Analyze an image with a custom ProfileAnalyzer for custom sensitivity settings.
+
+    Args:
+        image_path: Path to the image file
+        roi: Region of interest tuple (x, y, width, height)
+        group: USAF group number
+        element: USAF element number
+        analyzer: Optional custom ProfileAnalyzer with threshold and min_distance settings
+
+    Returns:
+        Tuple of (analysis results dict, intensity profile)
+    """
+    # Create an ImageProcessor with the analyzer's settings if provided
+    if analyzer is not None:
+        img_proc = ImageProcessor(
+            usaf_target=analyzer.usaf_target,
+        )
+    else:
+        img_proc = ImageProcessor(usaf_target=st.session_state.usaf_target)
+
+    # Use the new process_and_analyze method
+    results = img_proc.process_and_analyze(image_path, roi, group, element)
+
+    # Return the profile for backwards compatibility
+    profile = img_proc.profile
+
+    return results, profile
+
+
+def analyze_image(image_path, roi, group, element):
+    """Original analyze_image function kept for backwards compatibility"""
+    return analyze_image_with_analyzer(image_path, roi, group, element)
+
+
 def analyze_and_display_image(idx, uploaded_file):
     filename = (
         os.path.basename(uploaded_file)
         if isinstance(uploaded_file, str)
         else (
-            uploaded_file.name if hasattr(uploaded_file, "name") else f"Image {idx+1}"
+            uploaded_file.name if hasattr(
+                uploaded_file, "name") else f"Image {idx+1}"
         )
     )
     keys = get_image_session_keys(idx, uploaded_file)
@@ -2164,8 +2523,8 @@ def analyze_and_display_image(idx, uploaded_file):
 
     # Parse filename to get default values for magnification, group, and element
     default_values = parse_filename_for_defaults(filename)
-    default_group = default_values.get("group", DEFAULT_GROUP)
-    default_element = default_values.get("element", DEFAULT_ELEMENT)
+    default_group = default_values.get("group", config.DEFAULT_GROUP)
+    default_element = default_values.get("element", config.DEFAULT_ELEMENT)
     default_magnification = default_values.get("magnification", 10.0)
 
     # Get unique ID for this image
@@ -2238,7 +2597,8 @@ def analyze_and_display_image(idx, uploaded_file):
 
         # Display bit depth information
         bit_depth = st.session_state.get(bit_depth_key, 8)
-        st.info(f"Image bit depth: {bit_depth}-bit (Range: 0-{(1 << bit_depth)-1})")
+        st.info(
+            f"Image bit depth: {bit_depth}-bit (Range: 0-{(1 << bit_depth)-1})")
 
         # Extract ROI info for threshold calculation
         roi_tuple = display_roi_info(idx, image)
@@ -2251,10 +2611,12 @@ def analyze_and_display_image(idx, uploaded_file):
                 if len(profile_max) > 0:
                     min_val = np.min(profile_max)
                     max_val = np.max(profile_max)
-                    default_threshold = int(min_val + (max_val - min_val) * 0.4)
+                    default_threshold = int(
+                        min_val + (max_val - min_val) * 0.4)
                     # Ensure default_threshold is within valid range
                     default_threshold = max(0, min(255, default_threshold))
-                    st.write(f"Profile range: {int(min_val)} to {int(max_val)}")
+                    st.write(
+                        f"Profile range: {int(min_val)} to {int(max_val)}")
 
         # Form-based settings - all settings are batched together
         with st.form(key=f"analysis_settings_form_{unique_id}"):
@@ -2286,38 +2648,23 @@ def analyze_and_display_image(idx, uploaded_file):
                         "8",
                         "9",
                     ],
-                    index=(
-                        [
-                            "-2",
-                            "-1",
-                            "0",
-                            "1",
-                            "2",
-                            "3",
-                            "4",
-                            "5",
-                            "6",
-                            "7",
-                            "8",
-                            "9",
-                        ].index(str(default_group))
-                        if str(default_group)
-                        in {
-                            "-2",
-                            "-1",
-                            "0",
-                            "1",
-                            "2",
-                            "3",
-                            "4",
-                            "5",
-                            "6",
-                            "7",
-                            "8",
-                            "9",
-                        }
-                        else 2
-                    ),
+                    index=[
+                        "-2",
+                        "-1",
+                        "0",
+                        "1",
+                        "2",
+                        "3",
+                        "4",
+                        "5",
+                        "6",
+                        "7",
+                        "8",
+                        "9",
+                    ].index(str(default_group))
+                    if str(default_group)
+                    in ["-2", "-1", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+                    else 2,
                     key=f"group_radio_{unique_id}_form",
                     horizontal=True,
                 )
@@ -2328,7 +2675,7 @@ def analyze_and_display_image(idx, uploaded_file):
                     "Element",
                     options=["1", "2", "3", "4", "5", "6"],
                     index=int(default_element) - 1
-                    if 0 < int(default_element) <= MAX_USAF_ELEMENT
+                    if 0 < int(default_element) <= 6
                     else 0,
                     key=f"element_radio_{unique_id}_form",
                     horizontal=True,
@@ -2410,7 +2757,8 @@ def analyze_and_display_image(idx, uploaded_file):
                     "Threshold Line",
                     min_value=0,
                     max_value=max_threshold,  # Limit to 255
-                    value=int(st.session_state.get(threshold_key, default_threshold)),
+                    value=int(st.session_state.get(
+                        threshold_key, default_threshold)),
                     key=f"{threshold_key}_form",
                     help="Adjust the threshold line to find edges where the intensity crosses this value",
                 )
@@ -2430,11 +2778,13 @@ def analyze_and_display_image(idx, uploaded_file):
                 )
                 new_rotation = rotation_options.index(selected_rotation)
 
-            if st.form_submit_button(
-                "Apply Settings & Analyze",
-                type="primary",
-                use_container_width=True,
-            ):
+            # Form submit button - will apply all settings at once
+            submit_clicked = st.form_submit_button(
+                "Apply Settings & Analyze", type="primary", use_container_width=True
+            )
+
+            # Update session state with form values if form was submitted
+            if submit_clicked:
                 # Update target parameters
                 st.session_state[keys["group"]] = int(selected_group)
                 st.session_state[keys["element"]] = int(selected_element)
@@ -2477,7 +2827,7 @@ def analyze_and_display_image(idx, uploaded_file):
             st.markdown("#### Select ROI on Image")
 
             # Always display the original image for ROI selection (no rotation)
-            handle_image_selection(
+            roi_changed = handle_image_selection(
                 idx, uploaded_file, pil_img, key=f"usaf_image_{idx}", rotation=0
             )
 
@@ -2534,7 +2884,8 @@ def analyze_and_display_image(idx, uploaded_file):
                     st.pyplot(fig)
                     # Add download button for the processed image
                     buf = io.BytesIO()
-                    fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+                    fig.savefig(buf, format="png",
+                                bbox_inches="tight", dpi=150)
                     buf.seek(0)
                     # Compose filename with group, pixel size, and mag
                     pixel_size_str = "NA"
@@ -2595,7 +2946,8 @@ def analyze_and_display_image(idx, uploaded_file):
                     # Apply rotation to the preview if needed
                     if roi_rotation > 0:
                         roi_img_preview = Image.fromarray(
-                            rotate_image(np.array(roi_img_preview), roi_rotation)
+                            rotate_image(
+                                np.array(roi_img_preview), roi_rotation)
                         )
 
                     st.image(
@@ -2604,7 +2956,7 @@ def analyze_and_display_image(idx, uploaded_file):
                         use_container_width=True,
                     )
                 except Exception as e:
-                    st.warning(f"Could not display ROI preview: {e!s}")
+                    st.warning(f"Could not display ROI preview: {str(e)}")
             else:
                 st.info("Select an ROI to view analysis.")
 
@@ -2617,18 +2969,27 @@ def analyze_and_display_image(idx, uploaded_file):
         threshold = st.session_state.get(threshold_key, 50)
         # Ensure threshold is within valid range
         threshold = max(0, min(255, threshold))
+        threshold_changed = threshold != st.session_state.get(
+            f"last_threshold_{unique_id}", 0
+        )
         st.session_state[f"last_threshold_{unique_id}"] = threshold
 
         # Get current ROI rotation
         roi_rotation = st.session_state.get(roi_rotation_key, 0)
+        roi_rotation_changed = roi_rotation != st.session_state.get(
+            last_roi_rotation_key, 0
+        )
 
-        if (
+        # Determine if analysis should run - now triggered by form submission
+        should_analyze = (
             st.session_state.get(settings_changed_key, False)
             and current_selected_roi_tuple is not None
             and roi_is_valid
             and group_for_trigger is not None
             and element_for_trigger is not None
-        ):
+        )
+
+        if should_analyze:
             with st.spinner("Analyzing image..."):
                 try:
                     logging.getLogger().setLevel(logging.DEBUG)
@@ -2660,10 +3021,12 @@ def analyze_and_display_image(idx, uploaded_file):
                         **processing_params,
                     )
 
-                    st.session_state[keys["analyzed_roi"]] = current_selected_roi_tuple
+                    st.session_state[keys["analyzed_roi"]
+                                     ] = current_selected_roi_tuple
                     st.session_state[keys["analysis_results"]] = results_data
                     st.session_state[keys["last_group"]] = group_for_trigger
-                    st.session_state[keys["last_element"]] = element_for_trigger
+                    st.session_state[keys["last_element"]
+                                     ] = element_for_trigger
                     st.session_state[last_roi_rotation_key] = roi_rotation
 
                     # Clear settings changed flag after processing
@@ -2673,9 +3036,9 @@ def analyze_and_display_image(idx, uploaded_file):
                     st.rerun()
                 except Exception as e:
                     logger.error(f"Analysis failed: {e}")
-                    st.error(f"Analysis failed: {e!s}")
+                    st.error(f"Analysis failed: {str(e)}")
                     # Include more detailed error information to help debugging
-                    st.error(f"Error details: {type(e).__name__} - {e!s}")
+                    st.error(f"Error details: {type(e).__name__} - {str(e)}")
                     import traceback
 
                     st.error(f"Stack trace: {traceback.format_exc()}")
@@ -2692,6 +3055,19 @@ def analyze_and_display_image(idx, uploaded_file):
                 unsafe_allow_html=True,
             )
             display_analysis_details(analysis_results_for_details)
+
+
+def plot_intensity_profile(
+    results, annotated_roi_img=None, group=None, element=None, magnification=None
+):
+    """
+    Plot the intensity profile and analysis results.
+    This is now a thin wrapper around ProfileVisualizer for backward compatibility.
+    """
+    visualizer = ProfileVisualizer()
+    visualizer.display_in_streamlit(
+        results, annotated_roi_img, group, element, magnification
+    )
 
 
 def collect_analysis_data():
@@ -2723,11 +3099,13 @@ def collect_analysis_data():
         # Check if we have analysis results for this image
         if analysis_results := st.session_state.get(keys["analysis_results"]):
             # Get filename
-            filename = st.session_state.get(keys["image_name"], f"Image {idx+1}")
+            filename = st.session_state.get(
+                keys["image_name"], f"Image {idx+1}")
             data["Filename"].append(filename)
 
             # Get magnification
-            magnification = st.session_state.get(f"magnification_{unique_id}", 0)
+            magnification = st.session_state.get(
+                f"magnification_{unique_id}", 0)
             data["Magnification"].append(magnification)
 
             # Get group and element
@@ -2767,7 +3145,9 @@ def collect_analysis_data():
             roi_rotation = analysis_results.get("roi_rotation", 0)
             data["ROI Rotation"].append(f"{roi_rotation * 90}°")
 
-    return pd.DataFrame(data)
+    # Create DataFrame
+    df = pd.DataFrame(data)
+    return df
 
 
 def run_streamlit_app():
@@ -2798,7 +3178,8 @@ def run_streamlit_app():
                         for f in st.session_state.uploaded_files_list
                     ]
                     new_file_name = (
-                        file.name if hasattr(file, "name") else os.path.basename(file)
+                        file.name if hasattr(
+                            file, "name") else os.path.basename(file)
                     )
                     if new_file_name not in file_names:
                         st.session_state.uploaded_files_list.append(file)
@@ -2808,7 +3189,7 @@ def run_streamlit_app():
             st.markdown("---")
             st.markdown("### Analysis Tips")
             st.info("""
-            **Image Rotation**: Each image has a rotation slider to help align line pairs horizontally for better analysis.
+            **Image Rotation**: Each image has a rotation slider to help align line pairs horizontally for better analysis. 
             Use this feature when your USAF target is tilted.
             """)
 
@@ -2851,14 +3232,18 @@ def run_streamlit_app():
             ):
                 st.session_state.uploaded_files_list.append(default_image_path)
                 st.session_state.default_image_added = True
-                st.info(f"Using default image: {os.path.basename(default_image_path)}")
+                st.info(
+                    f"Using default image: {os.path.basename(default_image_path)}")
             if st.button("Clear All Images"):
                 st.session_state.uploaded_files_list = []
                 st.session_state.default_image_added = False
                 st.session_state.image_index_to_id = {}
                 st.success("All images cleared")
                 for key in list(st.session_state.keys()):
-                    if any(key.startswith(prefix) for prefix in SESSION_STATE_PREFIXES):
+                    if any(
+                        key.startswith(prefix)
+                        for prefix in config.SESSION_STATE_PREFIXES
+                    ):
                         del st.session_state[key]
                 st.rerun()
         main_container = st.container()
